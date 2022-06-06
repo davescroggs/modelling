@@ -1,0 +1,67 @@
+---
+title: "Tidymodels - workflow"
+output: github_document
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../documents/") })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Workflows
+
+> *The purpose of this concept (and the corresponding tidymodels workflow() object) is to encapsulate the major pieces of the modeling process (discussed in Section 1.5). The workflow is important in two ways. First, using a workflow concept encourages good methodology since it is a single point of entry to the estimation components of a data analysis. Second, it enables the user to better organize projects. - [Tidymodelling with R](https://www.tmwr.org/workflows.html)*
+
+The workflows package allows the user to bind modeling and pre-processing objects together.
+
+-   model engines (parsnip components)
+-   model formula
+-   pre-processing recipes
+-   model tuning parameters
+
+[Workflow sets](https://workflowsets.tidymodels.org) are containers for sets of workflow objects (preprocessing and model objects). They allow for components to be matched specifically, for example pre-processing steps specific to a modelling algorithm. Or, combinations of components can be trialled.
+
+## Combinations
+
+Rather than creating all 9 combinations of these preprocessors and models, we can create a workflow set:
+
+```{r}
+chi_models <- 
+   workflow_set(
+      preproc = list(simple = base_recipe, filter = filter_rec, 
+                     pca = pca_rec),
+      models = list(glmnet = regularized_spec, cart = cart_spec, 
+                    knn = knn_spec),
+      cross = TRUE
+   )
+chi_models
+#> # A workflow set/tibble: 9 × 4
+#>   wflow_id      info             option    result    
+#>   <chr>         <list>           <list>    <list>    
+#> 1 simple_glmnet <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 2 simple_cart   <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 3 simple_knn    <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 4 filter_glmnet <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 5 filter_cart   <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 6 filter_knn    <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 7 pca_glmnet    <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 8 pca_cart      <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 9 pca_knn       <tibble [1 × 4]> <opts[0]> <list [0]>
+```
+
+base_rec \<- recipe(weight_lbs \~ ott + year + country + gpc_site, data = pumpkin_train ) %\>% step_other(country, gpc_site, threshold = 0.02)
+
+ind_rec \<- base_rec %\>% step_dummy(all_nominal_predictors())
+
+spline_rec \<- ind_rec %\>% step_bs(ott) Then, let’s create three model specifications: a random forest model, a MARS model, and a linear model.
+
+rf_spec \<- rand_forest(trees = 1e3) %\>% set_mode("regression") %\>% set_engine("ranger")
+
+mars_spec \<- mars() %\>% set_mode("regression") %\>% set_engine("earth")
+
+lm_spec \<- linear_reg()
+
+Now it’s time to put the preprocessing and models together in a workflow_set().
+
+pumpkin_set \<- workflow_set( list(base_rec, ind_rec, spline_rec), list(rf_spec, mars_spec, lm_spec), cross = FALSE )
