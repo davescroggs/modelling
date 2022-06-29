@@ -1,0 +1,273 @@
+---
+title: "Sliced Ep 12"
+subtitle: "U.S. Small Business Administration (SBA) loans"
+output: html_document
+date: '2022-06-22'
+---
+
+```{r}
+library(tidyverse)
+library(skimr)
+library(scales)
+library(here)
+
+SBA_train <- read_csv(here("data/sliced-s01e12/train.csv"))
+
+SBA_train
+```
+
+## Quick overview
+
+```{r}
+skim(SBA_train)
+```
+- Very little missing data
+- 6 character variables
+- 14 numeric
+- prediction variable = default_amont
+
+
+## Default amount
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  ggplot(aes(default_amount)) +
+  geom_histogram() +
+  scale_x_log10()
+```
+- Distribution of default payments (if made) is log-normal
+
+```{r}
+SBA_train %>% 
+  count(default_amount > 0) %>% 
+  mutate(pct = (n/sum(n)) %>% percent())
+```
+
+3/4 of the rows are do not have a default amount paid
+
+## Character columns
+
+```{r}
+SBA_train %>% 
+  select_if(is.character) %>% 
+  colnames()
+```
+
+```{r}
+SBA_train %>% 
+  select_if(is.character) %>% 
+  summarise_all(~unique(.x) %>% length())
+
+```
+
+### State
+
+
+```{r}
+SBA_train %>% 
+  mutate(tf = default_amount > 0) %>% 
+  group_by(State,tf) %>% 
+  summarise(n = n()) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  ggplot(aes(x = pct,y = fct_reorder(State,pct,min),fill = tf)) + 
+  geom_col(position = "stack") +
+  geom_text(aes(label = percent(pct,1)),position = position_stack(vjust = 0.5)) +
+  labs(x = "Percent default",
+       y = "State") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+```
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  mutate(log_default_amt = log(default_amount)) %>% 
+  group_by(State) %>% 
+  summarise(default_mean = mean(log_default_amt),
+            default_median = median(log_default_amt)) %>% 
+  ggplot(aes(y = fct_reorder(State,default_mean))) + 
+  geom_point(aes(x = default_mean), col = "red") +
+  geom_point(aes(x = default_median), col = "blue") +
+  labs(x = "log mean/median default",
+       y = "State") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+```
+
+```{r}
+library(usmap)
+SBA_train %>% 
+  rename(state = State) %>% 
+  count(state, wt = default_amount,sort = T) %>% 
+plot_usmap(data = .,regions = "state",values = "n", color = "white") + 
+  scale_fill_continuous(name = "Default amount", label = scales::comma) + 
+  theme(legend.position = "right")
+
+```
+### Sector
+
+```{r}
+SBA_train %>% 
+  count(Sector,wt = default_amount,sort = T) %>% 
+  ggplot(aes(x = n, y = fct_reorder(Sector,n))) + 
+  geom_col() +
+  labs(x = "Total default amount ($)",
+       y = "Sector") +
+  scale_x_continuous(labels = dollar) +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1))
+```
+
+
+```{r}
+SBA_train %>% 
+  mutate(tf = default_amount > 0) %>% 
+  group_by(Sector,tf) %>% 
+  summarise(n = n()) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  ggplot(aes(x = pct,y = fct_reorder(Sector,pct,min),fill = tf)) + 
+  geom_col(position = "stack") +
+  geom_text(aes(label = percent(pct,1)),position = position_stack(vjust = 0.5)) +
+  labs(x = "Percent default",
+       y = "Sector") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+```
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  mutate(log_default_amt = log(default_amount)) %>% 
+  group_by(Sector) %>% 
+  summarise(default_mean = mean(log_default_amt),
+            default_median = median(log_default_amt)) %>% 
+  ggplot(aes(y = fct_reorder(Sector,default_mean))) + 
+  geom_point(aes(x = default_mean), col = "red") +
+  geom_point(aes(x = default_median), col = "blue") +
+  labs(x = "Percent default",
+       y = "Sector") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+```
+
+```{r}
+SBA_train %>% 
+  #filter(default_amount > 0) %>% 
+  filter(default_amount > 0,str_detect(Sector, "Public|Real")) %>% 
+  mutate(log_default_amt = log(default_amount)) %>%
+  ggplot(aes(log_default_amt,col = Sector)) +
+  geom_density() +
+  theme(legend.position = "bottom")
+```
+
+Looks like the "Public administration sector" is bi-modal. Could be worth separating into high/low amounts.
+
+### Banks
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  mutate(log_default_amt = log(default_amount)) %>% 
+  group_by(Bank) %>% 
+  summarise(default_mean = mean(log_default_amt),
+            default_median = median(log_default_amt)) %>% 
+  ggplot(aes(y = fct_reorder(Bank,default_mean))) + 
+  geom_point(aes(x = default_mean), col = "red") +
+  geom_point(aes(x = default_median), col = "blue") +
+  labs(x = "Percent default",
+       y = "Bank") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+```
+```{r}
+SBA_train %>% 
+  mutate(log_default_amt = log(default_amount),
+         Bank = fct_lump_prop(Bank,0.003)) %>%
+  group_by(Bank,tf = default_amount > 0) %>% 
+  summarise(n = n()) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  filter(tf) %>% 
+  ggplot(aes(x = pct, y = fct_reorder(Bank,pct))) + 
+  geom_point(aes(size = n)) +
+  labs(x = "Percent default",
+       y = "Bank") +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        legend.position = "bottom")
+
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  mutate(log_default_amt = log(default_amount)) %>% 
+  group_by(Bank,log_default_amt) %>% 
+  summarise(n = n()) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  arrange(-pct)
+```
+
+## Numerical columns
+
+```{r}
+SBA_train %>% 
+  select_if(is.numeric)
+```
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  group_by(ApprovalFY) %>% 
+  summarise(default_mean = mean(default_amount)) %>% 
+  ggplot(aes(ApprovalFY,default_mean)) +
+  geom_col() +
+  scale_y_continuous(labels = dollar)
+```
+
+```{r}
+SBA_train %>% 
+  filter(default_amount > 0) %>% 
+  mutate(Sector = fct_lump(Sector,10)) %>% 
+  count(Sector,ApprovalFY, wt = default_amount) %>% 
+  ggplot(aes(ApprovalFY,n)) +
+  geom_col() +
+  scale_y_continuous(labels = dollar) +
+  facet_wrap(~Sector)
+```
+
+```{r}
+SBA_train %>% 
+  ggplot(aes(DisbursementGross,SBA_Appv)) +
+  geom_point(alpha = 0.3) +
+  geom_abline(slope = 1) +
+  geom_abline(slope = 0.9) +
+  geom_abline(slope = 0.1) +
+  geom_abline(slope = 0.75) +
+  geom_hline(yintercept = 1E6) +
+  geom_hline(yintercept = 75E4)
+```
+
+```{r}
+SBA_train %>% 
+  ggplot(aes(DisbursementGross,default_amount)) +
+  geom_point() +
+  geom_abline()
+```
+
+Definietly correlated
+
+```{r}
+SBA_train %>% 
+  filter(Name == "SUBWAY")
+```
+
+```{r}
+SBA_train %>% 
+  ggplot(aes(NewExist,fill = default_amount > 0)) +
+  geom_bar(position = "fill")
+```
+
+```{r}
+SBA_train %>%
+  filter(NewExist %in% 1:2) %>%
+  ggplot(aes(x = log(default_amount),fill = factor(NewExist))) +
+  geom_histogram(binwidth = 0.1) +
+  facet_wrap(~NewExist,scales = "free_y")
+```
+
