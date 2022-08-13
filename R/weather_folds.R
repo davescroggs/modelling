@@ -2,6 +2,7 @@ library(tidyverse)
 library(tidymodels)
 library(glmnet)
 library(ranger)
+library(lubridate)
 
 # David Robinson, Sliced Episode 4 - https://github.com/dgrtwo/data-screencasts/blob/master/ml-practice/ep4.Rmd
 
@@ -48,6 +49,10 @@ train %>%
 
 # Specify model -------------------------------------------------------------
 
+rf_basic <- rand_forest() %>% 
+  set_engine(engine = "ranger") %>% 
+  set_mode("classification")
+
 rf_spec <- rand_forest(
   mtry = tune(),
   trees = tune(),
@@ -55,40 +60,77 @@ rf_spec <- rand_forest(
     set_engine(engine = "ranger") %>% 
     set_mode("classification")
 
-glm_spec <- logistic_reg(penalty = tune(), mixture = 1) %>% 
-    set_engine(engine = "glmnet") %>% 
-    set_mode("classification")
-
 # Recipe ------------------------------------------------------------------
+train %>% select()
+weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
+                           date + pressure9am + pressure3pm,
+                         data = train) %>%
+  step_impute_median(humidity9am) %>%
+  step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_date(date,
+            features = c("month", "year", "week"),
+            keep_original_cols = F) %>%
+  #step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
+  step_ns(date_week,deg_free = tune("deg week")) %>% 
+  step_ns(date_year,deg_free = tune("deg year"))
 
-weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm, data = train) %>% 
-    step_impute_mean(rain_today,humidity3pm)
-
-weather_recipe2 <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am + date, data = train) %>% 
-    step_impute_linear(humidity3pm,impute_with = imp_vars(humidity9am)) %>% 
-    step_impute_median(all_numeric_predictors()) %>% 
-    step_date(date, features = c("month", "year"),keep_original_cols = F) %>% 
-    step_num2factor(date_year, levels = as.character(2007:2017))
-
+#Inspect the resulting processed training data
+weather_recipe %>% 
+  prep() %>% 
+  juice() %>% count(date_week)
 
 # Tuning ------------------------------------------------------------------
+
+small_train <- train %>% 
+  sample_n(1000) %>% 
+  vfold_cv(v = 5,strata = rain_tomorrow)
+
+mset <- metric_set(mn_log_loss,f_meas)
+
+
+# Tune splines ------------------------------------------------------------
+
+df_vals <- 2:10
+# A regular grid:
+spline_grid <- expand.grid(`deg week` = df_vals, `deg year` = df_vals)
+
+tune_splines <- tune_grid(
+  rf_basic,
+  preprocessor = weather_recipe,
+  resamples = small_train,
+  metrics = mset,
+  grid = spline_grid
+)
+
+autoplot(tune_splines)
+
+collect_metrics(tune_splines)
+
+# Tune RF params ----------------------------------------------------------
+
 
 set.seed(345)
 tune_res <- tune_grid(
   rf_spec,
-  resamples = trees_folds,
-  grid = 20
+  preprocessor = weather_recipe,
+  resamples = small_train,
+  metrics = mset,
+  grid = 5
 )
 
+autoplot(tune_res)
+
+collect_metrics(tune_res)
 
 # Workflow ----------------------------------------------------------------
 
 rand_wf <- workflow() %>%
-    add_recipe(weather_recipe2) %>%
+    add_recipe(weather_recipe) %>%
     add_model(rf_spec)
 
 log_ref_wf <- workflow() %>%
-    add_recipe(weather_recipe2) %>%
+    add_recipe(weather_recipe) %>%
     add_model(glm_spec) %>% 
     tune_grid(val_set,
               grid = lr_reg_grid,
