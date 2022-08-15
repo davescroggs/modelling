@@ -1,6 +1,5 @@
 library(tidyverse)
 library(tidymodels)
-library(glmnet)
 library(ranger)
 library(lubridate)
 
@@ -13,7 +12,6 @@ train <- read_csv("data/train.csv") %>%
     mutate(rain_tomorrow = if_else(rain_tomorrow == 1, "IsRaining","NotRaining") %>% factor())
 
 train_folds <- vfold_cv(train,v = 5,strata = rain_tomorrow)
-
 
 # EDA ---------------------------------------------------------------------
 
@@ -55,13 +53,25 @@ rf_basic <- rand_forest() %>%
 
 rf_spec <- rand_forest(
   mtry = tune(),
-  trees = tune(),
+  trees = 1000,
   min_n = tune()) %>% 
     set_engine(engine = "ranger") %>% 
     set_mode("classification")
 
 # Recipe ------------------------------------------------------------------
-train %>% select()
+
+prep_juice <- function(x) prep(x) %>% juice()
+
+weather_spline_rec <- 
+  recipe(rain_tomorrow ~ date + rain_today,data = train) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_date(date,
+            features = c("month", "week"),
+            keep_original_cols = F,label = F) %>%
+  #step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
+  step_ns(date_week,deg_free = tune("deg week")) %>% 
+  step_ns(date_month,deg_free = tune("deg month"))
+
 weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
                            date + pressure9am + pressure3pm,
                          data = train) %>%
@@ -70,20 +80,20 @@ weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am 
   step_impute_median(all_numeric_predictors()) %>%
   step_date(date,
             features = c("month", "year", "week"),
-            keep_original_cols = F) %>%
-  #step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
-  step_ns(date_week,deg_free = tune("deg week")) %>% 
-  step_ns(date_year,deg_free = tune("deg year"))
+            keep_original_cols = F,label = FALSE) %>%
+  step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
+  step_ns(date_week,deg_free = 5) %>% 
+  step_ns(date_month,deg_free = 3)
 
 #Inspect the resulting processed training data
 weather_recipe %>% 
   prep() %>% 
-  juice() %>% count(date_week)
+  juice()
 
 # Tuning ------------------------------------------------------------------
 
 small_train <- train %>% 
-  sample_n(1000) %>% 
+  sample_n(10000) %>% 
   vfold_cv(v = 5,strata = rain_tomorrow)
 
 mset <- metric_set(mn_log_loss,f_meas)
@@ -93,14 +103,15 @@ mset <- metric_set(mn_log_loss,f_meas)
 
 df_vals <- 2:10
 # A regular grid:
-spline_grid <- expand.grid(`deg week` = df_vals, `deg year` = df_vals)
+spline_grid <- expand.grid(`deg week` = df_vals, `deg month` = df_vals)
 
 tune_splines <- tune_grid(
   rf_basic,
-  preprocessor = weather_recipe,
+  preprocessor = weather_spline_rec,
   resamples = small_train,
   metrics = mset,
-  grid = spline_grid
+  grid = spline_grid,
+  control = control_grid(verbose = TRUE)
 )
 
 autoplot(tune_splines)
@@ -109,19 +120,26 @@ collect_metrics(tune_splines)
 
 # Tune RF params ----------------------------------------------------------
 
+rf_grid <- grid_max_entropy(
+  mtry(range = c(2, 15)),
+  min_n(range = c(6,15)),
+  size = 10
+)
+
 
 set.seed(345)
-tune_res <- tune_grid(
+tune_rf <- tune_grid(
   rf_spec,
   preprocessor = weather_recipe,
   resamples = small_train,
   metrics = mset,
-  grid = 5
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE)
 )
 
-autoplot(tune_res)
+autoplot(tune_rf)
 
-collect_metrics(tune_res)
+collect_metrics(tune_rf)
 
 # Workflow ----------------------------------------------------------------
 
