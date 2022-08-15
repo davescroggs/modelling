@@ -4,14 +4,18 @@ library(ranger)
 library(lubridate)
 
 # David Robinson, Sliced Episode 4 - https://github.com/dgrtwo/data-screencasts/blob/master/ml-practice/ep4.Rmd
+# Kaggle competition - 
 
 # Load data ---------------------------------------------------------------
 
-test <- read_csv("data/test.csv")
-train <- read_csv("data/train.csv") %>% 
+test <- read_csv("data/sliced-s01e04/test.csv")
+train <- read_csv("data/sliced-s01e04/train.csv") %>% 
     mutate(rain_tomorrow = if_else(rain_tomorrow == 1, "IsRaining","NotRaining") %>% factor())
 
-train_folds <- vfold_cv(train,v = 5,strata = rain_tomorrow)
+train_folds <- 
+  vfold_cv(train,v = 5,strata = rain_tomorrow)
+
+train_split <- initial_split(train,strata = rain_tomorrow,prop = 0.9)
 
 # EDA ---------------------------------------------------------------------
 
@@ -141,50 +145,52 @@ autoplot(tune_rf)
 
 collect_metrics(tune_rf)
 
-# Workflow ----------------------------------------------------------------
 
-rand_wf <- workflow() %>%
-    add_recipe(weather_recipe) %>%
-    add_model(rf_spec)
 
-log_ref_wf <- workflow() %>%
-    add_recipe(weather_recipe) %>%
-    add_model(glm_spec) %>% 
-    tune_grid(val_set,
-              grid = lr_reg_grid,
-              control = control_grid(save_pred = TRUE),
-              metrics = metric_set(roc_auc))
+# Tune round 2 ------------------------------------------------------------
+
+# Try 2-6 predictors (mtry), min_n 15-30 
+
+rf_grid <- grid_regular(
+  mtry(range = c(2, 6)),
+  min_n(range = c(15,30)),
+  levels = 5
+)
+
+
+set.seed(345)
+tune_rf <- tune_grid(
+  rf_spec,
+  preprocessor = weather_recipe,
+  resamples = small_train,
+  metrics = mset,
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE)
+)
+
+autoplot(tune_rf)
 
 # Fit model ---------------------------------------------------------------
 
-ctrl <- control_resamples(extract = function(x) extract_fit_parsnip(x) %>% tidy(),
-                          save_pred = TRUE)
+ctrl <- control_resamples(extract = function(x) extract_fit_parsnip(x) %>%
+                            tidy(),
+                          save_pred = TRUE,
+                          verbose = TRUE)
 
-fit_rf <- rand_wf %>% 
-  fit_resamples(resamples = train_folds, control = ctrl)
+final_rf <- 
+  finalize_model(rf_spec,select_best(tune_rf,metric = "mn_log_loss")) 
 
-# Logistic regression
+final_wf <- workflow() %>%
+  add_recipe(weather_recipe) %>%
+  add_model(final_rf)
 
-lr_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+final_res <- final_wf %>%
+  last_fit(train_split,metrics = mset)
 
-fit_lr <- log_ref_wf %>%  fit_resamples(resamples = train_folds, control = ctrl)
 # Evaluate performance ----------------------------------------------------
 
-fit_rf %>% 
-    mutate(f_meas = map_dbl(.predictions,~f_meas_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_class)),
-           accuracy = map_dbl(.predictions,~accuracy_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_class)),
-           mn_log_loss = map_dbl(.predictions,~mn_log_loss_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_IsRaining))) %>% 
-    summarise(mean = mean(mn_log_loss))
+final_res %>%
+  collect_metrics()
 
 
-fit_r2 %>% 
-    mutate(f_meas = map_dbl(.predictions,~f_meas_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_class)),
-           accuracy = map_dbl(.predictions,~accuracy_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_class)),
-           mn_log_loss = map_dbl(.predictions,~mn_log_loss_vec(truth = .x$rain_tomorrow,estimate = .x$.pred_IsRaining))) %>% 
-    summarise(mean = mean(mn_log_loss))
 
-
-?finalize_workflow
-
-
-workflow_set()
