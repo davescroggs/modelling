@@ -77,8 +77,9 @@ weather_spline_rec <-
   step_ns(date_month,deg_free = tune("deg month"))
 
 weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
-                           date + pressure9am + pressure3pm,
+                           date + pressure9am + pressure3pm + id,
                          data = train) %>%
+  update_role(id,new_role = "id") %>% 
   step_impute_median(humidity9am) %>%
   step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
   step_impute_median(all_numeric_predictors()) %>%
@@ -192,5 +193,6 @@ final_res <- final_wf %>%
 final_res %>%
   collect_metrics()
 
+# Create sample submission ------------------------------------------------
 
-
+final_res
