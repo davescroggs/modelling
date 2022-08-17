@@ -1,0 +1,251 @@
+---
+title: "Untitled"
+output: github_document
+---
+
+# Sliced Episode 5 - predict the price of Airbnb listings in NYC
+
+The evaluation metric for this competition is Root Mean Squared Logarithmic Error.
+
+## Data dictionary
+
+-   id: unique identifier
+
+-   name: name of the listing
+
+-   host_id: unique identifier for the host of the listing
+
+-   host_name: name of the host
+
+-   neighbourhood_group: borough where the listing is located (e.g., "Manhattan")
+
+-   neighbourhood: neighborhood where the listing is located (e.g., "East Harlem")
+
+-   latitude: latitude of the listing location
+
+-   longitude: longitude of the listing location
+
+-   room_type: type of room ('Entire home/apt', 'Private room', or 'Shared room')
+
+-   price: cost for one night booking of the listing (this is what you're predicting; only present in `train.csv`)
+
+-   minimum_nights: minimum number of nights required to book the listing
+
+-   number_of_reviews: number of reviews the listing has
+
+-   last_review: date the last review of the listing was made
+
+-   reviews_per_month: number of reviews the listing gets per month on average
+
+-   calculated_host_listings_count: number of listing the host has
+
+-   availability_365: number of days out of the year the listing is available
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(lubridate)
+library(here)
+library(patchwork)
+library(tidytext)
+
+# David Robinson, Sliced Episode 5 - https://github.com/dgrtwo/data-screencasts/blob/master/ml-practice/ep5.Rmd
+# Kaggle competition - https://www.kaggle.com/competitions/sliced-s01e05-WXx7h8/data
+
+# Load data ---------------------------------------------------------------
+
+test <- read_csv(here("data/sliced-s01e05/test.csv"),col_types = cols())
+train <- read_csv(here("data/sliced-s01e05/train.csv"),col_types = cols())
+
+train_folds <- 
+  vfold_cv(train,v = 5)
+
+train_split <- initial_split(train)
+```
+
+# Dataset description
+
+```{r}
+skimr::skim(train)
+```
+
+# EDA
+
+## Price
+
+```{r}
+p1 <- train %>% 
+  ggplot(aes(price)) +
+  geom_histogram(binwidth = 50)
+
+p2 <- train %>% 
+  mutate(price = log10(price)) %>% 
+  ggplot(aes(price)) +
+  geom_histogram()
+
+p1 + p2
+```
+```{r}
+train %>% 
+  mutate(price = log10(price)) %>% 
+  ggplot(aes(x = latitude, y = longitude,col = neighbourhood_group,fill = price)) +
+  geom_point(pch = 21) +
+  scale_x_reverse() +
+  scale_fill_gradient(low = "green", high = "red")
+```
+
+```{r}
+train %>% 
+  mutate(price = log10(price)) %>% 
+  ggplot(aes(price,fct_reorder(neighbourhood_group,price))) +
+  geom_violin(draw_quantiles = 0.5)
+```
+
+```{r}
+train %>% 
+  mutate(price = log10(price)) %>% 
+  ggplot(aes(number_of_reviews,price)) +
+  geom_point() +
+  geom_density_2d()
+```
+
+```{r}
+train %>% 
+  mutate(night_grps = fct_lump(factor(minimum_nights),20)) %>% 
+  ggplot(aes(x = log10(price + 1), y = night_grps)) +
+  geom_violin(draw_quantiles = 0.5)
+```
+
+```{r}
+train %>% 
+  mutate(price = log10(price)) %>% 
+  ggplot(aes(minimum_nights,price)) +
+  geom_point()
+```
+
+
+```{r}
+train %>% 
+  #mutate(price = log10(price)) %>% 
+  group_by(neighbourhood) %>% 
+  summarise(median = median(price),
+            n = n()) %>% 
+  arrange(median) %>% 
+  slice(1:15,(n()-15):n()) %>% 
+  ggplot(aes(median,fct_reorder(neighbourhood,median))) +
+  geom_point(aes(size = n)) +
+  scale_x_continuous(breaks = seq(0,700,50))
+```
+
+```{r}
+train %>% 
+  ggplot(aes(latitude, longitude,col = log10(price))) +
+  geom_hex() +
+  scale_x_reverse() +
+  facet_wrap(~neighbourhood_group)
+
+train %>% 
+  ggplot(aes(latitude, longitude,col = neighbourhood_group)) +
+  geom_point() +
+  scale_x_reverse()
+```
+
+```{r}
+train %>% 
+  ggplot(aes(x = price,y = room_type)) + 
+  geom_violin(draw_quantiles = 0.5) +
+  geom_label(data = . %>% group_by(room_type) %>% summarise(median = median(price),n = n()),
+             aes(x = median,y = room_type,label = paste("n =",n))) +
+  scale_x_log10()
+```
+
+```{r}
+train %>% 
+  mutate(calculated_host_listings_count = fct_lump(factor(calculated_host_listings_count),n = 10),
+         price = log10(price + 1)) %>% 
+  ggplot(aes(x = price, y = calculated_host_listings_count)) +
+  ggridges::geom_density_ridges()
+```
+
+## Text analysis
+
+```{r}
+train %>% 
+  mutate(name_no_stop = str_remove_all(name,"\\b(in|the|of|a)(?<=\\b)")) %>% 
+  # filter(str_detect(name_no_stop,"in")) %>% 
+  # select(name,name_no_stop)
+  tidytext::unnest_tokens(text,name_no_stop,token = "ngrams",n = 2) %>% 
+  filter(!text %in% stop_words$word) %>%
+  group_by(text) %>% 
+  summarise(mean_price = mean(price),
+            n = n()) %>% 
+  filter(n > 200) %>% 
+  arrange(-mean_price)
+
+```
+
+# Modelling
+
+## First simple model
+
+```{r}
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = 1000,
+  min_n = tune()) %>% 
+    set_engine(engine = "ranger") %>% 
+    set_mode("regression")
+```
+
+```{r}
+
+prep_juice <- function(x) prep(x) %>% juice()
+
+abb_rec <- 
+  recipe(price ~ neighbourhood_group + longitude + latitude +
+           minimum_nights + reviews_per_month + availability_365, data = train) %>% 
+  step_log(price, base = 10) %>% 
+  step_dummy(neighbourhood_group) %>% 
+  step_impute_median(all_numeric_predictors())
+```
+
+### Workflow
+
+```{r}
+rf_workflow <- workflow() %>% 
+  add_model(rf_spec) %>% 
+  add_recipe(abb_rec)
+```
+
+
+### Tune hyperparameters
+
+```{r}
+small_train <- train %>% 
+  sample_n(8000) %>% 
+  vfold_cv(v = 5)
+
+mset <- metric_set(rmse)
+
+# Tuning ------------------------------------------------------------
+
+rf_grid <- grid_max_entropy(
+  mtry(range = c(5, 9)),
+  min_n(range = c(5,100)),
+  size = 10
+)
+
+tune_hps <- tune_grid(
+  rf_workflow,
+  resamples = small_train,
+  metrics = mset,
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE)
+)
+
+autoplot(tune_hps)
+
+collect_metrics(tune_hps)
+```
+
