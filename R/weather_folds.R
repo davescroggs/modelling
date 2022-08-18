@@ -3,6 +3,8 @@ library(tidymodels)
 library(ranger)
 library(lubridate)
 
+doParallel::registerDoParallel(cores = 2)
+
 # David Robinson, Sliced Episode 4 - https://github.com/dgrtwo/data-screencasts/blob/master/ml-practice/ep4.Rmd
 # Kaggle competition - 
 
@@ -87,8 +89,9 @@ weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am 
             features = c("month", "year", "week"),
             keep_original_cols = F,label = FALSE) %>%
   step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
-  step_ns(date_week,deg_free = 5) %>% 
-  step_ns(date_month,deg_free = 3)
+  step_ns(date_week,deg_free = 2) %>% 
+  step_ns(date_month,deg_free = 8) %>% 
+  step_dummy(date_year)
 
 #Inspect the resulting processed training data
 weather_recipe %>% 
@@ -123,7 +126,16 @@ autoplot(tune_splines)
 
 collect_metrics(tune_splines)
 
+select_best(tune_splines)
+
+# Best splines
+# `deg week` = 2, `deg month` = 8
+
 # Tune RF params ----------------------------------------------------------
+
+rf_wf <- workflow() %>% 
+  add_recipe(weather_recipe) %>% 
+  add_model(rf_spec)
 
 rf_grid <- grid_max_entropy(
   mtry(range = c(2, 15)),
@@ -133,7 +145,7 @@ rf_grid <- grid_max_entropy(
 
 
 set.seed(345)
-tune_rf <- tune_grid(
+tune_rf_r1 <- tune_grid(
   rf_spec,
   preprocessor = weather_recipe,
   resamples = small_train,
@@ -160,7 +172,7 @@ rf_grid <- grid_regular(
 
 
 set.seed(345)
-tune_rf <- tune_grid(
+tune_rf_r2 <- tune_grid(
   rf_spec,
   preprocessor = weather_recipe,
   resamples = small_train,
@@ -171,6 +183,8 @@ tune_rf <- tune_grid(
 
 autoplot(tune_rf)
 
+# mtry = 5, min_n = 30
+
 # Fit model ---------------------------------------------------------------
 
 ctrl <- control_resamples(extract = function(x) extract_fit_parsnip(x) %>%
@@ -179,11 +193,7 @@ ctrl <- control_resamples(extract = function(x) extract_fit_parsnip(x) %>%
                           verbose = TRUE)
 
 final_rf <- 
-  finalize_model(rf_spec,select_best(tune_rf,metric = "mn_log_loss")) 
-
-final_wf <- workflow() %>%
-  add_recipe(weather_recipe) %>%
-  add_model(final_rf)
+  finalize_workflow(rf_wf,select_best(tune_rf,metric = "mn_log_loss")) 
 
 final_res <- final_wf %>%
   last_fit(train_split,metrics = mset)
