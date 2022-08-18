@@ -2,6 +2,7 @@ library(tidyverse)
 library(tidymodels)
 library(ranger)
 library(lubridate)
+library(xgboost)
 
 # David Robinson, Sliced Episode 4 - https://github.com/dgrtwo/data-screencasts/blob/master/ml-practice/ep4.Rmd
 # Kaggle competition - 
@@ -88,7 +89,8 @@ weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am 
             keep_original_cols = F,label = FALSE) %>%
   step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
   step_ns(date_week,deg_free = 5) %>% 
-  step_ns(date_month,deg_free = 3)
+  step_ns(date_month,deg_free = 3) %>% 
+  step_dummy(date_year)
 
 #Inspect the resulting processed training data
 weather_recipe %>% 
@@ -196,3 +198,36 @@ final_res %>%
 # Create sample submission ------------------------------------------------
 
 final_res
+
+
+# XGBoost -----------------------------------------------------------------
+
+xgb_spec <- boost_tree() %>% 
+  set_mode("classification")
+
+
+weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
+                           date + pressure9am + pressure3pm + id,
+                         data = train) %>%
+  update_role(id,new_role = "id") %>% 
+  step_impute_median(humidity9am) %>%
+  step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_date(date,
+            features = c("month", "year", "week"),
+            keep_original_cols = F,label = FALSE) %>%
+  step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
+  step_ns(date_week,deg_free = 5) %>% 
+  step_ns(date_month,deg_free = 3) %>% 
+  step_dummy(date_year)
+
+xgb_wf <- workflow() %>% 
+  add_recipe(weather_recipe) %>% 
+  add_model(xgb_spec)
+
+xgb_resamples <- fit_resamples(xgb_wf,
+                               resamples = small_train,
+                               metrics = mset,
+                               control = control_grid(verbose = TRUE))
+
+xgb_resamples %>% collect_metrics()
