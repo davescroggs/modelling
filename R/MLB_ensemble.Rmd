@@ -1,0 +1,401 @@
+---
+title: "MLB - Stacked"
+output: github_document
+---
+
+https://www.kaggle.com/competitions/nwds-xstrikes
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(tidymodels)
+library(ranger)
+
+dataset <- read_csv(here("data", "MLB-pitch-data", "train.csv")) %>% 
+  mutate(is_strike = if_else(is_strike == 1, "stike", "no_strike"))
+holdout <- read_csv(here("data", "MLB-pitch-data", "test.csv")) 
+
+mlb_split <- initial_split(dataset)
+test <- testing(mlb_split)
+train <- training(mlb_split)
+
+```
+
+
+## Pre-processing
+
+First recipe
+  - Numeric: plate_x, plate_z, sz_top, sz_bot, balls, strikes
+  - Categorical: pitch_type
+  - Logical: on_1b, on_2b, on_3b
+  - Engineered: in_zone
+
+```{r}
+# Horizontal strike-zone from mid-point of home plate
+horiz_sz = (17/2 + 2.9)/12
+  
+mlb_recipe <- 
+  recipe(formula = is_strike ~ uid + plate_x + plate_z + sz_top + sz_bot + balls + strikes + release_spin_rate +
+           pitch_type +
+           on_1b + on_2b + on_3b,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_mutate(inZone = if_else(between(plate_x,-(17/2 + 2.9)/12, (17/2 + 2.9)/12) & between(plate_z,sz_bot, sz_top), 1,0)) %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type, btr_count) %>% 
+  step_dummy(all_nominal_predictors())
+
+mlb_recipe %>% prep %>% juice
+```
+
+
+## Tune major hyper-parameters - trees, mtry, set learn rate = 0.02
+
+```{r}
+doParallel::registerDoParallel(cores = 3)
+
+mset <- metric_set(mn_log_loss)
+control <- control_grid(verbose = TRUE, save_pred = TRUE)
+
+mlb_cv_small <- train %>% 
+  sample_n(75000) %>% 
+  vfold_cv(strata = is_strike, v = 10)
+
+xgboost_spec1 <- 
+  boost_tree(
+    mode = "classification",
+    trees = tune(),
+    mtry = tune(),
+    learn_rate = 0.02)
+  #   min_n = 10,
+  #   tree_depth = 5,
+  #   learn_rate = 0.1,
+  #   loss_reduction = 0
+  # )
+
+grid_step1 <- crossing(trees = seq(200, 600, 100), mtry = seq(6, 15, 3))
+
+
+xgboost_tune1 <-
+  tune_grid(
+    object = xgboost_spec1,
+    preprocessor = mlb_recipe,
+    resamples = mlb_cv_small,
+    grid = grid_step1,
+    metrics = mset,
+    control = control
+  )
+
+beepr::beep(8)
+autoplot(xgboost_tune1)
+
+xgboost_tune1 %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = trees, y = mean, col = factor(mtry), group = .config)) +
+  geom_point() +
+  geom_line()
+  
+```
+
+```{r}
+grid_step2 <- crossing(trees = seq(600, 900, 100), mtry = c(7, 8, 12))
+
+
+xgboost_tune1 <-
+  tune_grid(
+    object = xgboost_spec1,
+    preprocessor = mlb_recipe,
+    resamples = mlb_cv_small,
+    grid = grid_step2,
+    metrics = mset,
+    control = control
+  )
+
+autoplot(xgboost_tune1)
+```
+
+
+### Fit resamples
+
+```{r}
+mlb_cv <- train %>% 
+  vfold_cv(strata = is_strike, v = 10)
+
+
+xgboost_resamples <-
+  finalize_model(xgboost_spec1, tibble(mtry = 12, trees = 700)) %>% 
+  fit_resamples(
+    preprocessor = mlb_recipe,
+    resamples = mlb_cv,
+    metrics = mset,
+    control = control
+  )
+
+xgboost_resamples %>% collect_metrics()
+```
+
+### Recipe tuning
+
+```{r}
+mlb_recipe_dgr <- 
+  recipe(formula = is_strike ~ .,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_mutate(inZone_low = plate_z - sz_bot,
+              inZone_high = plate_z - sz_top,
+              btr_count = paste(balls, strikes, sep = "-")) %>% 
+  step_rm(sz_bot, sz_top) %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type, btr_count) %>% 
+  step_dummy(all_nominal_predictors())
+  
+mlb_recipe_full <- 
+  recipe(formula = is_strike ~ .,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type) %>% 
+  step_dummy(all_nominal_predictors())
+
+mlb_recipe_dgr_simple <- 
+  recipe(formula = is_strike ~ uid + plate_x + plate_z + sz_top + sz_bot + balls + strikes + release_spin_rate +
+           pitch_type +
+           on_1b + on_2b + on_3b,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+
+mlb_cv_small <- train %>% 
+  sample_frac(0.5) %>% 
+  vfold_cv(strata = is_strike, v = 10)
+
+xgboost_tuned <- 
+  boost_tree(
+    mode = "classification",
+    trees = 700,
+    mtry = 15,
+    learn_rate = 0.02)
+
+recipe_training <-
+  workflow_set(
+    preproc = list(dgr = mlb_recipe_dgr, simple = mlb_recipe_dgr_simple, full = mlb_recipe_full),
+    models = list(xgb = xgboost_tuned), 
+    cross = TRUE
+  ) %>%
+  workflow_map(
+    fn = "fit_resamples",
+    resamples = mlb_cv_small,
+    metrics = mset,
+    control = control
+  )
+
+recipe_training %>% 
+  rank_results(rank_metric = "mn_log_loss") %>% 
+  select(wflow_id, mean)
+
+```
+
+wflow_id    mean
+full_xgb	  0.1501383			
+simple_xgb  0.1548401			
+dgr_xgb	    0.1556858	
+
+## Final major tune 1
+
+```{r}
+mlb_cv_small <- train %>% 
+  sample_frac(0.25) %>% 
+  vfold_cv(strata = is_strike, v = 5)
+
+xgboost_spec_major <- 
+  boost_tree(
+    mode = "classification",
+    trees = tune(),
+    mtry = tune(),
+    learn_rate = 0.02)
+  #   min_n = 10,
+  #   tree_depth = 5,
+  #   learn_rate = 0.1,
+  #   loss_reduction = 0
+  # )
+
+grid_step_major <- crossing(trees = c(600, 650, 700), mtry = seq(15, 25, 5))
+
+
+xgboost_tune_major <-
+  tune_grid(
+    object = xgboost_spec_major,
+    preprocessor = mlb_recipe_dgr,
+    resamples = mlb_cv_small,
+    grid = grid_step_major,
+    metrics = mset,
+    control = control
+  )
+
+beepr::beep(8)
+xgboost_tune_major %>%
+  collect_metrics() %>% 
+  ggplot(aes(x = trees, y = mean, col = factor(mtry), group = .config)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+xgboost_spec_major2 <- 
+  boost_tree(
+    mode = "classification",
+    trees = 700,
+    mtry = 20,
+    learn_rate = 0.02,
+    min_n = tune(),
+    tree_depth = tune()
+  )
+
+grid_step_major2 <- grid_latin_hypercube(min_n(),tree_depth(), size = 20)
+
+
+xgboost_tune_major <-
+  tune_grid(
+    object = xgboost_spec_major2,
+    preprocessor = mlb_recipe_dgr,
+    resamples = mlb_cv_small,
+    grid = grid_step_major2,
+    metrics = mset,
+    control = control
+  )
+
+xgboost_tune_major %>% autoplot()
+
+xgboost_tune_major %>% select_best()
+```
+
+
+## Last fit
+
+```{r}
+last_fit <- workflow(
+  preprocessor = mlb_recipe_dgr,
+  spec = boost_tree(
+    mode = "classification",
+    trees = 700,
+    mtry = 20,
+    learn_rate = 0.02,
+    min_n = 11,
+    tree_depth = 6
+  )
+) %>%
+  last_fit(mlb_split, metrics = mset)
+
+last_fit %>% 
+  collect_metrics()
+```
+Full - 0.1454
+## Create model
+
+```{r}
+final_model <- workflow(
+  preprocessor = mlb_recipe_dgr,
+  spec = boost_tree(
+    mode = "classification",
+    trees = 700,
+    mtry = 20,
+    learn_rate = 0.02,
+    min_n = 11,
+    tree_depth = 6
+  )
+) %>%
+  fit(train)
+```
+
+
+```{r}
+importances <- xgboost::xgb.importance(model = final_model$fit$fit$fit)
+
+importances %>%
+  mutate(Feature = fct_reorder(Feature, Gain)) %>%
+  ggplot(aes(Gain, Feature)) +
+  geom_point()
+```
+
+```{r}
+final_model %>% 
+   augment(holdout) %>%
+    select(uid, is_strike = .pred_stike) %>% 
+    write_csv("../data/MLB-pitch-data/tuned_xgb.csv")
+```
+
+### Check residuals
+
+```{r}
+results <- final_model %>% 
+  augment(test)
+
+results %>% 
+  filter(is_strike != .pred_class) %>% arrange(-.pred_stike)
+```
+
+## Random forest
+
+```{r}
+mlb_recipe_dgr <- 
+  recipe(formula = is_strike ~ .,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_mutate(inZone_low = plate_z - sz_bot,
+              inZone_high = plate_z - sz_top,
+              btr_count = paste(balls, strikes, sep = "-")) %>% 
+  step_rm(sz_bot, sz_top) %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type, btr_count) %>% 
+  step_dummy(all_nominal_predictors())
+  
+mlb_recipe_full <- 
+  recipe(formula = is_strike ~ .,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type) %>% 
+  step_dummy(all_nominal_predictors())
+
+mlb_recipe_dgr_simple <- 
+  recipe(formula = is_strike ~ uid + plate_x + plate_z + sz_top + sz_bot + balls + strikes + release_spin_rate +
+           pitch_type +
+           on_1b + on_2b + on_3b,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_bin2factor(on_1b, on_2b, on_3b) %>% 
+  step_unknown(pitch_type) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+
+mlb_cv_small <- train %>% 
+  sample_frac(0.5) %>% 
+  vfold_cv(strata = is_strike, v = 10)
+
+rand_forest_randomForest_spec <- rand_forest(mode = "classification", engine = 'ranger', mtry = 8, min_n = 5,trees = 1000)
+
+recipe_training <-
+  workflow_set(
+    preproc = list(dgr = mlb_recipe_dgr, simple = mlb_recipe_dgr_simple, full = mlb_recipe_full),
+    models = list(xgb = rand_forest_randomForest_spec), 
+    cross = TRUE
+  ) %>%
+  workflow_map(
+    fn = "fit_resamples",
+    resamples = mlb_cv_small,
+    metrics = mset,
+    control = control
+  )
+
+recipe_training %>% 
+  rank_results(rank_metric = "mn_log_loss") %>% 
+  select(wflow_id, mean)
+```
+

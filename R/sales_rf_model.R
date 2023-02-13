@@ -10,8 +10,9 @@ sales_split <- read_csv(here("data","sliced_s01e03","train.csv")) %>%
 sales_test <- testing(sales_split)  
 sales_train <- training(sales_split)  
 
-sales_cv <- rsample::vfold_cv(sales_train, v = 10)  
+sales_cv <- rsample::vfold_cv(sales_train, v = 5)  
 
+# Random forest model -----------------------------------------------------
 # Pre-processing/recipes --------------------------------------------------
 
 
@@ -19,17 +20,12 @@ first_rec <- recipe(profit ~ id + sales + discount + city + quantity + category 
                     data = sales_train) %>% 
   update_role(id, new_role = "id") %>% 
   step_log(sales) %>% 
-  step_other(city) %>% 
+  step_other(city, threshold = 40) %>% 
   step_dummy(all_nominal_predictors())
 
-#first_rec %>% prep %>% juice
+first_rec %>% prep %>% juice
 
-# Random forest model -----------------------------------------------------
 ## Model spec --------------------------------------------------------------
-
-linear_reg_glmnet_spec <-
-  linear_reg(penalty = tune(), mixture = tune()) %>%
-  set_engine('glmnet')
 
 rand_forest_ranger_spec <-
   rand_forest(trees = 1000, mtry = tune(), min_n = tune()) %>%
@@ -45,7 +41,7 @@ mset <- metric_set(rmse)
 
 cgrid <- control_grid(verbose = TRUE,save_pred = TRUE)
 
-rf_grid <- grid_latin_hypercube(mtry(c(4,15)), min_n(c(2, 10)),size = 10)
+rf_grid <- grid_latin_hypercube(mtry(c(10,20)), min_n(c(2, 10)),size = 10)
 
 rf_tune <- tune_grid(rand_forest_ranger_spec, first_rec, sales_cv,
                      grid = rf_grid,
@@ -63,16 +59,11 @@ rf_tune %>%
 rf_tune %>% 
   select_best()
 
-best_mn_log_l <- select_best(rand_wf, "mn_log_loss")
-
 final_rf <-  workflow() %>% 
   add_model(finalize_model(rand_forest_ranger_spec,
                  select_best(rf_tune, "rmse"))) %>% 
   add_recipe(first_rec) %>% 
   fit(read_csv(here("data","sliced_s01e03","train.csv")))
-
-final_rf %>%
-  collect_metrics()
 
 final_rf %>% 
   augment(read_csv(here("data","sliced_s01e03","test.csv")))
@@ -95,34 +86,59 @@ final_rf %>%
 
 
 ## Feature Importance ------------------------------------------------------
+library(vip)
 
+final_rf %>%
+  extract_fit_engine() %>% 
+  vip(geom = "point")
 
-# Linear model
-usemodels::use_glmnet(profit ~ sales + discount + city + quantity + category + sub_category,
-                      data = train)
+# XGBoost ------------------------------------------------------------
 
+usemodels::use_xgboost(profit ~ id + sales + discount + city + quantity + category + sub_category,
+                        data = sales_train, verbose = TRUE, tune = TRUE)
 
-glmnet_recipe <- 
-  recipe(formula = sales ~ discount + city + quantity + category + sub_category, 
-         data = train) %>% 
+xgboost_recipe <- 
+  recipe(formula = profit ~ id + sales + discount + city + quantity + category + 
+           sub_category, data = sales_train) %>% 
   step_zv(all_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) 
+  update_role(id, new_role = "id") %>% 
+  step_log(sales) %>% 
+  step_other(city, threshold = 40) %>% 
+  step_dummy(all_nominal_predictors())
 
-glmnet_spec <- 
-  linear_reg(penalty = tune(), mixture = tune()) %>% 
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune()) %>% 
   set_mode("regression") %>% 
-  set_engine("glmnet") 
+  set_engine("xgboost")
 
-glmnet_workflow <- 
+xgb_grid <- grid_latin_hypercube(trees(c(400,1200)), min_n(c(2,40)), tree_depth(c(1,15)), learn_rate(c(.005, .01), trans = NULL), size = 10)
+
+xgboost_workflow <- 
   workflow() %>% 
-  add_recipe(glmnet_recipe) %>% 
-  add_model(glmnet_spec) 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
 
-glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
-                                                                                      0.2, 0.4, 0.6, 0.8, 1)) 
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = sales_cv,
+            grid = xgb_grid, control = cgrid,
+            metrics = mset)
 
-glmnet_tune <- 
-  tune_grid(glmnet_workflow, resamples = stop("add your rsample object"), grid = glmnet_grid) 
+xgboost_tune %>% 
+  autoplot()
 
+## Finalise model ----------------------------------------------------------
 
+xgboost_tune %>% 
+  select_best()
+
+final_xgb <-  workflow() %>% 
+  add_model(boost_tree(trees = 1000, min_n = 5, tree_depth = 5, learn_rate = 0.01) %>% 
+              set_mode("regression") %>% 
+              set_engine("xgboost")) %>% 
+  add_recipe(xgboost_recipe) %>% 
+  fit(read_csv(here("data","sliced_s01e03","train.csv")))
+
+final_xgb %>% 
+  predict_holdout() %>% 
+  write_csv("data/sliced_s01e03/sample_sub.csv")
 

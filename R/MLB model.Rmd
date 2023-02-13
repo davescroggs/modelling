@@ -1,0 +1,90 @@
+---
+title: "Baseball pitches - Predicting strikes!"
+output: github_document
+---
+
+https://www.kaggle.com/competitions/nwds-xstrikes
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(tidymodels)
+
+train <- read_csv(here("data", "MLB-pitch-data", "train.csv"))
+test <- read_csv(here("data", "MLB-pitch-data", "test.csv"))
+
+mlb_cv <- vfold_cv(train, strata = is_strike, v = 5)
+```
+
+## Simple Random Forest
+
+```{r}
+ranger_recipe <- 
+  recipe(formula = is_strike ~ uid + sz_top + sz_bot + pitch_type + release_pos_x +
+           release_pos_y + release_pos_z + stand + p_throws +
+           inning_topbot + outs_when_up + balls + strikes + release_speed +
+           spin_axis + release_spin_rate + pfx_x + pfx_z + plate_x + plate_z,
+         data = train) %>% 
+  step_mutate(is_strike = if_else(is_strike == 1, "strike", "no strike") %>% factor()) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_other(pitch_type,threshold = 0.05) %>% 
+  #step_num2factor(inning, levels = as.character(1:20)) %>% 
+  step_dummy(all_nominal_predictors())
+  
+ranger_recipe %>% prep %>% juice
+
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+```
+
+## Tune parameters
+
+```{r}
+rf_grid <- expand.grid(mtry = seq(2, 22, 5), min_n = c(5, 25))
+
+folds_small <- train %>% 
+  sample_frac(size = 0.1) %>% 
+  vfold_cv(strata = is_strike, v = 5)
+
+rf_tune <- tune_grid(object = ranger_workflow,
+                     resamples = folds_small,
+                     control = control_grid(verbose = TRUE),
+                     metrics = metric_set(mn_log_loss),
+                     grid = rf_grid)
+
+beepr::beep(8)
+
+rf_tune %>% 
+  collect_metrics()
+
+rf_tune %>% autoplot()
+```
+
+```{r}
+rf_resamples <- 
+  #finalize_workflow(ranger_workflow, select_best(rf_tune, "mn_log_loss")) %>% 
+  workflow() %>% 
+  add_model(rand_forest(mtry = 14, min_n = 25, trees = 1000) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger")) %>% 
+  add_recipe(ranger_recipe) %>% 
+  fit_resamples(resamples = mlb_cv,
+                control = control_grid(verbose = TRUE, save_pred = TRUE),
+                     metrics = metric_set(mn_log_loss))
+beepr::beep(8)
+
+rf_resamples %>% collect_metrics()
+```
+
+```{r}
+rf_resamples %>% 
+  conf_mat_resampled()
+```
+

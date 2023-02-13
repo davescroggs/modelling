@@ -1,0 +1,518 @@
+---
+title: "First attempt at NWVS"
+output: github_document
+---
+
+
+I couldn't play along at the time because it was the middle of the day here, plut this took me longer than 2 hours.
+
+## NWVS - predict the build year of houses based upon their features
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(here)
+
+train <- read_csv(here("data/NWVS/train.csv"))
+test <- read_csv(here("data/NWVS/test.csv"))
+
+houses_cv <- train %>% 
+  vfold_cv(v = 10)
+```
+
+## SKIM!
+
+```{r}
+(skimobj <- skimr::skim(train))
+```
+
+
+## EDA
+
+### Predictor
+
+```{r}
+train %>% 
+  count(yearBuilt) %>% 
+  ggplot(aes(x = yearBuilt, y = n)) +
+  geom_col(fill = "dodgerblue", col = "black") + 
+  geom_curve(x = 1875, y = 400, xend = min(train$yearBuilt), yend = 20,
+             arrow = arrow(length = unit(0.03, "npc"), type = "closed")) +
+  annotate("text", x = 1875, y = 400, label = "Earliest house - 1860", hjust = 0) +
+  geom_curve(x = 2000, y = 600, xend = max(train$yearBuilt), yend = 20, curvature = -0.5,
+             arrow = arrow(length = unit(0.03, "npc"), type = "closed")) +
+  annotate("text", x = 2000, y = 600, label = "Latest house - 2021", hjust = 1) +
+  labs(x = "Year built",
+       y = "# homes") +
+  theme_bw()
+```
+### Categorical predictors
+
+```{r}
+categ_cols <- function(df, col){
+  df %>% 
+    count({{col}}) %>% 
+    mutate("{{col}}" := fct_reorder({{col}}, n),
+           pct = scales::percent(n/sum(n), accuracy = 1.1)) %>% 
+    ggplot(aes(x = n, y = {{col}})) +
+    geom_col(fill = "dodgerblue", colour = "black") +
+    geom_text(aes(label = pct))
+}
+```
+
+
+```{r}
+skimobj %>% 
+  filter(skim_type == "character") %>% 
+  as_tibble()
+```
+
+#### Home type
+
+```{r}
+train %>% 
+  categ_cols(homeType)
+```
+
+- Few categories, most of the rows are of one type - Single_family
+
+#### architecturalStyle
+
+```{r}
+train %>% 
+  categ_cols(architecturalStyle)
+```
+
+- Largest group is missing data (lots of work to impute values today!)
+- Most of the rows of in a few different categories (lump smaller groups)
+
+#### constructionMaterials
+
+```{r}
+train %>% 
+  categ_cols(constructionMaterials)
+```
+- Significant missing data (lots of work to impute values today!)
+- Again, most of the rows of in a few different categories (lump smaller groups)
+
+Materials are probably a good indicator for year built
+
+```{r}
+train %>% 
+  mutate(constructionMaterials = fct_lump(as.character(constructionMaterials), n = 10, other_level = "other")) %>%
+  count(yearBuilt, constructionMaterials) %>% 
+  ggplot(aes(x = yearBuilt, y = n)) +
+  geom_col(col = "black", fill = "dodgerblue") +
+  facet_wrap(~constructionMaterials, scales = "free_y", ncol = 2)
+```
+
+ - Looks like certain materials were used in different eras, but gotta be careful not to overfit
+ - 10 levels seems a good start
+
+### Numerical predictors
+
+```{r}
+skimobj %>% 
+  filter(skim_type == "numeric") %>% 
+  as_tibble() %>% 
+  select(skim_type:complete_rate) %>% 
+  knitr::kable()
+```
+
+ - Some of these could be interpreted as ordinal/categorical maybe? Bedrooms, bathrooms, stories?
+ 
+#### lastSoldPrice
+
+```{r}
+train %>% 
+  group_by(yearBuilt) %>% 
+  summarise(median = median(lastSoldPrice, na.rm = TRUE)) %>% 
+  ggplot(aes(x = yearBuilt, y = median)) +
+  geom_point() +
+  labs(y = "Median last sold price")
+```
+
+#### Lotsize
+
+```{r}
+train %>% 
+  group_by(yearBuilt) %>% 
+  summarise(median = median(lotSize, na.rm = TRUE)) %>% 
+  ggplot(aes(x = yearBuilt, y = median)) +
+  geom_point() +
+  labs(y = "Median lot size")
+```
+
+
+#### Potential categoricals
+
+##### Bedrooms
+
+```{r}
+train %>% 
+  mutate(bedrooms = fct_lump(as.character(bedrooms), n = 6)) %>%
+  count(yearBuilt, bedrooms) %>% 
+  ggplot(aes(x = yearBuilt, y = n)) +
+  geom_col(col = "black", fill = "dodgerblue") +
+  facet_grid(bedrooms~., scales = "free_y")
+```
+
+##### Bathrooms
+
+```{r}
+train %>% 
+  mutate(bathrooms = as.character(bathrooms)) %>% 
+  categ_cols(bathrooms)
+```
+ - Lump this and convert to categorical
+
+
+##### Stories
+
+```{r}
+train %>% 
+  mutate(stories = as.character(stories)) %>% 
+  categ_cols(stories)
+```
+
+##### hasAttachedGarage
+
+```{r}
+train %>% 
+  mutate(hasAttachedGarage = as.character(hasAttachedGarage)) %>% 
+  categ_cols(hasAttachedGarage)
+```
+
+ - Essentially a dummy var
+
+##### hasFireplace
+
+```{r}
+train %>% 
+  mutate(hasFireplace = as.character(hasFireplace)) %>% 
+  categ_cols(hasFireplace)
+```
+
+```{r}
+train %>% 
+  ggplot(aes(x = yearBuilt, fill = factor(hasFireplace))) +
+  geom_bar(position = position_fill())
+  
+```
+
+
+##### hasView
+
+```{r}
+train %>% 
+  mutate(hasView = as.character(hasView)) %>% 
+  categ_cols(hasView)
+```
+
+### Missing values
+
+```{r}
+skimobj %>% 
+  filter(n_missing > 0) %>% 
+  as_tibble() %>% 
+  select(skim_type:complete_rate) %>% 
+  arrange(-n_missing)
+```
+
+
+## Model build
+
+
+### Recipes
+
+ - Impute missing
+    - Categorical: architecturalStyle, constructionMaterials
+ - Lump smaller groups: architecturalStyle, constructionMaterials
+
+From the recipes [website](https://recipes.tidymodels.org/articles/Ordering.html)
+Order
+1. Impute
+2. Handle factor levels
+3. Individual transformations for skewness and other issues
+4. Discretize (if needed and if you have no other choice)
+5. Create dummy variables
+6. Create interactions
+7. Normalization steps (center, scale, range, etc)
+8. Multivariate transformation (e.g. PCA, spatial sign, etc)
+
+```{r}
+tree_recipe <- 
+  recipe(formula = yearBuilt ~ ., data = train) %>% 
+  step_zv(all_predictors()) %>% 
+  update_role(houseID, new_role = "id") %>% 
+  # I don't know the best way to do this!
+  step_impute_median(stories) %>% 
+  # impute missing data - hasAttachedGarage, hasFireplace
+  step_impute_median(hasFireplace, hasAttachedGarage) %>% 
+  # architecturalStyle, constructionMaterials,
+  step_impute_mode(architecturalStyle, constructionMaterials) %>% 
+  # lotSize,
+  step_impute_knn(lotSize, impute_with = imp_vars(lastSoldPrice, latitude, longitude)) %>%
+  step_mutate(bathrooms = round(bathrooms)) %>% 
+  step_num2factor(stories, levels = as.character(1:5)) %>% 
+  step_other(architecturalStyle, constructionMaterials, stories, threshold = 0.05) %>% 
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+  
+ tree_recipe %>% prep %>% bake(train)
+
+```
+
+
+### Model spec
+
+ - Fit a model with some default values
+ 
+```{r}
+ranger_spec <- 
+  rand_forest(mtry = 10, min_n = 15, trees = 1000) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger")
+
+xgboost_spec <- 
+  boost_tree(trees = 1250, min_n = 15, tree_depth = 10, learn_rate = 0.02) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+```
+
+### Fit resamples
+
+```{r}
+# metrics
+mset <- metric_set(rmse)
+
+control <- control_grid(verbose = TRUE, save_pred = TRUE)
+
+model_trials <- workflow_set(preproc = list(tree_rec = tree_recipe),
+             models = list(rf = ranger_spec, xgb = xgboost_spec),
+             cross = TRUE)
+
+model_resamples <- workflow_map(
+  model_trials,
+  "fit_resamples",
+  resamples = houses_cv,
+  metrics = mset,
+  control = control,
+  verbose = TRUE
+)
+```
+
+```{r}
+model_resamples %>% 
+  collect_metrics()
+```
+
+
+#### Check residuals
+
+```{r}
+model_resamples %>% 
+  collect_predictions() %>% 
+  ggplot(aes(x = yearBuilt, y = .pred)) +
+  geom_point(alpha = 0.05) +
+  geom_abline(col = "blue")
+```
+ - The earlier and later years aren't getting predicted well
+
+### Model tuning
+
+- TBA
+
+#### Model workflows
+
+##### Random Forest
+
+```{r}
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger")
+
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+```
+
+
+```{r}
+set.seed(65652)
+ranger_tune <-
+  tune_grid(ranger_workflow, resamples = stop("add your rsample object"), grid = stop("add number of candidate points"))
+
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = stop("add your rsample object"), grid = stop("add number of candidate points"))
+```
+
+##### XGBoost
+
+
+###### Step 1: Fix learning rate and number of estimators for tuning tree-based parameters
+```{r}
+xgboost_spec1 <- 
+  boost_tree(trees = tune(), min_n = 10, tree_depth = 5, learn_rate = 0.1, loss_reduction = 0) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+
+grid_step1 <- grid_regular(trees(range = c(100,1000)), levels = 10)
+
+xgboost_tune1 <-
+  tune_grid(
+    object = xgboost_spec1,
+    preprocessor = tree_recipe,
+    resamples = houses_cv,
+    grid = grid_step1,
+    metrics = mset,
+    control = control
+  )
+
+xgboost_tune %>% 
+  autoplot()
+```
+
+##### Step 2
+
+- Trees: 700
+
+2. Tune tree-specific parameters ( max_depth, min_child_weight, gamma, subsample, colsample_bytree) for decided learning rate and number of trees. Note that we can choose different parameters to define a tree and I’ll take up an example here.
+
+```{r}
+xgboost_spec2 <- 
+  boost_tree(learn_rate = 0.02,
+    trees = 1000,
+    mtry = tune(),
+    min_n = 10,    
+    tree_depth = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+
+grid_step2 <- grid_latin_hypercube(
+    mtry(range = c(10, 17)),
+    tree_depth(range = c(8, 20)),size = 30)
+
+xgboost_tune2 <-
+  tune_grid(
+    object = xgboost_spec2,
+    preprocessor = tree_recipe,
+    resamples = houses_cv,
+    grid = grid_step2,
+    metrics = mset,
+    control = control
+  )
+
+xgboost_tune2 %>% 
+  autoplot()
+
+xgboost_tune2 %>% select_best()
+```
+
+### DGRTWO Method
+
+- Pick out the numeric variables, or the low-cardinality categorical ones
+- Mean-impute missing values, if any
+
+
+```{r}
+# Recipe
+
+dgr_recipe <- 
+  recipe(formula = yearBuilt ~ ., data = train) %>% 
+  step_zv(all_predictors()) %>% 
+  update_role(houseID, new_role = "id") %>% 
+  step_impute_mean(stories, hasFireplace, hasAttachedGarage, lotSize) %>% 
+  step_impute_mode(architecturalStyle, constructionMaterials) %>% 
+  step_mutate(bathrooms = round(bathrooms)) %>% 
+  step_num2factor(stories, levels = as.character(1:5)) %>% 
+  step_other(architecturalStyle, constructionMaterials, stories, threshold = 0.05) %>% 
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+```
+
+- Fit an xgboost boosted trees model, with learn_rate = .02, mtry varying from 2-4, and trees varying from 300 to 800
+- Plot a learning curve (showing the performance as the number of trees varies), and use it to adjust mtry and trees if needed.
+
+```{r}
+xgboost_spec_dgr <- 
+  boost_tree(learn_rate = 0.02,
+    trees = tune(),
+    mtry = tune(),
+    tree_depth = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+
+grid_step_dgr <- grid_latin_hypercube(
+  trees(range = c(300,800)),
+    mtry(range = c(2, 10)),
+    tree_depth(range = c(5, 20)),size = 30)
+
+xgboost_tune_dgr <-
+  tune_grid(
+    object = xgboost_spec_dgr,
+    preprocessor = dgr_recipe,
+    resamples = houses_cv,
+    grid = grid_step_dgr,
+    metrics = mset,
+    control = control
+  )
+
+xgboost_tune_dgr %>% collect_metrics() %>% filter(trees > 700) %>% ggplot(aes(tree_depth, mtry, col = trees)) +geom_point()
+  autoplot()
+
+xgboost_tune_dgr %>% 
+  select_best()
+```
+
+
+#### Check fit
+
+```{r}
+xgb_resamples <- workflow(preprocessor = tree_recipe,
+                           spec = finalize_model(xgboost_spec2, select_best(xgboost_tune2))) %>% 
+  fit_resamples(resamples = houses_cv,
+  metrics = mset,
+  control = control)
+
+xgb_resamples %>% 
+  collect_metrics()
+```
+
+
+
+### Final fit
+
+```{r}
+
+# Early model
+prod_model <- workflow() %>%
+  add_recipe(tree_recipe) %>%
+  add_model(ranger_spec) %>%
+  fit(train)
+
+txgb_fit_final <- workflow(preprocessor = tree_recipe,
+                           spec = boost_tree(learn_rate = 0.02,
+    trees = 1000,
+    mtry = 15,
+    min_n = 10,    
+    tree_depth = 18) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")) %>% 
+  fit(train)
+```
+
+
+
+### Create submission
+
+```{r}
+txgb_fit_final %>% 
+    augment(test) %>%
+    select(houseID, yearBuilt = .pred) %>% 
+  write_csv("../data/NWVS/fine_tuned_xgb_submission.csv")
+```
+

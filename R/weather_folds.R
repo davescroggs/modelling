@@ -215,28 +215,89 @@ xgb_spec <- boost_tree() %>%
   set_mode("classification")
 
 
-weather_recipe <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
-                           date + pressure9am + pressure3pm + id,
+weather_rec_simple <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
+                               pressure9am + pressure3pm,
                          data = train) %>%
-  update_role(id,new_role = "id") %>% 
   step_impute_median(humidity9am) %>%
   step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
-  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_median(all_numeric_predictors())
+
+weather_dates_no_year <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
+                                  date + pressure9am + pressure3pm,
+                                data = train) %>%
+  step_impute_median(humidity9am) %>%
+  step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
+  step_impute_median(all_numeric_predictors()) %>% 
   step_date(date,
-            features = c("month", "year", "week"),
+            features = c("month", "week"),
+            keep_original_cols = F,label = FALSE) %>%
+  step_ns(date_week,deg_free = 2) %>% 
+  step_ns(date_month,deg_free = 8)
+
+weather_recipe_w_year <- recipe(rain_tomorrow ~ rain_today + humidity3pm + humidity9am +
+                                  date + pressure9am + pressure3pm,
+                                data = train) %>%
+  step_impute_median(humidity9am) %>%
+  step_impute_linear(humidity3pm, impute_with = imp_vars(humidity9am)) %>%
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_date(date,
+            features = c("month","year", "week"),
             keep_original_cols = F,label = FALSE) %>%
   step_mutate(date_year = as.character(date_year) %>% factor(levels = as.character(2007:2017))) %>% 
-  step_ns(date_week,deg_free = 5) %>% 
-  step_ns(date_month,deg_free = 3) %>% 
+  step_ns(date_week,deg_free = 2) %>% 
+  step_ns(date_month,deg_free = 8) %>% 
   step_dummy(date_year)
 
+weather_recipe_dr <- xg_rec <- recipe(rain_tomorrow ~ date + rain_today +
+                                           min_temp + max_temp + rainfall +
+                                           wind_gust_speed + wind_speed9am +
+                                           wind_speed3pm + humidity9am + humidity3pm + pressure9am +
+                                           pressure3pm + cloud9am + cloud3pm + temp9am + temp3pm +
+                                           location +
+                                           rain_today, data = train) %>%
+  step_date(date,
+            features = c("week"),
+            keep_original_cols = F,label = FALSE) %>% 
+  step_other(location, threshold = 0.05) %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+  
+
+weather_recipe_dr %>% prep_juice()
+
 xgb_wf <- workflow() %>% 
-  add_recipe(weather_recipe) %>% 
+  add_recipe(weather_recipe_dr) %>% 
   add_model(xgb_spec)
 
-xgb_resamples <- fit_resamples(xgb_wf,
-                               resamples = small_train,
-                               metrics = mset,
-                               control = control_grid(verbose = TRUE))
+multiple_xgb <- workflow_set(preproc = list(simple = weather_rec_simple,
+                                            no_year = weather_dates_no_year,
+                                            w_year = weather_recipe_w_year,
+                                            dr = weather_recipe_dr),
+                             models = list(xgb = xgb_spec),
+                             cross = T) %>% 
+  workflow_map("fit_resamples",
+               resamples = train_folds,
+               metrics = mset)
 
-xgb_resamples %>% collect_metrics()
+multiple_xgb %>%
+  collect_metrics()
+
+fit_resamples(xgb_wf,resamples = train_folds,metrics = mset) %>% collect_notes()
+
+# Variable importance -----------------------------------------------------
+
+train %>%
+  group_by(location,rain_tomorrow) %>% 
+  summarise(n = n()) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  filter(rain_tomorrow == "IsRaining") %>% 
+  arrange(-pct)
+
+
+
+importances <- xgboost::xgb.importance(mod = extract_fit_engine(multiple_xgb))
+importances %>%
+  mutate(Feature = fct_reorder(Feature, Gain)) %>%
+  ggplot(aes(Gain, Feature)) +
+  geom_col()

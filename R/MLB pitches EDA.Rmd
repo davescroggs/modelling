@@ -1,0 +1,418 @@
+---
+title: "Strikes EDA"
+author: "Dave Scroggs"
+date: "2023-01-27"
+output: github_document
+---
+
+## Intro
+
+This analysis and modelling process followed Dave Robinson's from [Sliced lap 1, episode 4](https://www.youtube.com/watch?v=42GyyDM3Uzg&t=4005s). This round of sliced was about predicting whether or not it would rain tomorrow in Australian cities. Dave looked 
+
+
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(patchwork)
+
+train <- read_csv(here("data", "MLB-pitch-data", "train.csv")) %>% 
+  mutate(is_strike = factor(if_else(is_strike == 1, "strike", "no_strike")))
+
+pitch_type_lookup <- tibble::tribble(
+    ~pitch_description, ~pitch_type,
+            "Changeup",        "CH",
+           "Curveball",        "CU",
+              "Cutter",        "FC",
+              "Eephus",        "EP",
+            "Forkball",        "FO",
+  "Four-Seam Fastball",        "FA",
+         "Knuckleball",        "KN",
+       "Knuckle-curve",        "KC",
+           "Screwball",        "SC",
+              "Sinker",        "SI",
+              "Slider",        "SL",
+            "Splitter",        "FS",
+   "Two-Seam Fastball",        "FT",
+  "Sweeping curve",            "CS",
+  "Four-Seam Fastball",        "FF"
+  )
+
+```
+
+## Skim!
+
+```{r}
+(mlb_skim <- skimr::skim(train))
+```
+
+## Summarise function
+
+The function below is adapted directly from DRobs notebook from [sliced ep 3](https://github.com/dgrtwo/data-screencasts/blob/c914b888df88198b67e2898216f8c6d40c072e2a/ml-practice/ep4.Rmd#L65). It's a function to summarise binomial outputs by group and gives a [credible interval](http://varianceexplained.org/r/credible_intervals_baseball/) for the percentage of strikes observed for each category.
+
+```{r}
+summarise_strikes <- function(df) {
+  df %>% 
+    summarise(n_strike = sum(is_strike == "strike"),
+              n = n(),
+              .groups = "drop") %>% 
+    arrange(desc(n)) %>% 
+    mutate(pct_strike = n_strike/n,
+           low = qbeta(.025, n_strike + 0.5, n - n_strike + .5),
+           high = qbeta(.975, n_strike + 0.5, n - n_strike + .5)) %>%
+    mutate(pct = n / sum(n))
+}
+```
+
+## Categorical variables
+
+The data set has 6 categorical variables
+
+```{r}
+mlb_skim %>% 
+  as_tibble() %>% 
+  filter(skim_type == "character")
+```
+
+### Pitch type
+
+```{r}
+train %>% 
+  left_join(pitch_type_lookup,
+            by = "pitch_type") %>% 
+  #mutate(pitch_description = fct_lump(pitch_description, prop = 0.01)) %>% 
+  group_by(pitch_description) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(pitch_description, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  labs(x = "% strike",
+       y = "Pitch type") +
+  theme_bw()
+```
+
+- The is a large range in the percentage of stikes thrown for each pitch type.
+- Sinkers have the highest percentage of pitches that end in strikes, with a small credible interval
+- Eephus(?!?), sweeping curve and knuckleballs all have large credible intervals (fewer pitches)
+
+### Stand
+
+```{r}
+train %>% 
+  group_by(stand) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(stand, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  labs(x = "% strike",
+       y = "Batter stance") +
+  theme_bw()
+```
+- There doesn't appear to be a large difference between leftys and rightys
+
+### Pitcher throwing arm
+
+```{r}
+train %>% 
+  group_by(p_throws) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(p_throws, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5)  +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  labs(x = "% strike",
+       y = "Pitch type") +
+  theme_bw()
+```
+
+- As above, the doesn't appear to be a large difference between lefty and righty pitchers
+
+### inning_topbot
+
+```{r fig.width=10}
+p1 <- train %>% 
+  group_by(inning_topbot) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(inning_topbot, pct_strike))) +
+  geom_point() +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5)  +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  labs(x = "% strike",
+       y = "Innings top/bottom") +
+  theme_bw()
+
+p2 <- train %>% 
+  filter(inning < 10) %>% 
+  group_by(inning,inning_topbot) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(inning_topbot, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  scale_size(breaks = seq(10000,20000,length.out = 5)) +
+  facet_grid(inning~.) +
+  labs(subtitle = "Sritke % of top and bottom of first 9 innings",
+       x = "% strike",
+       y = "Innings top/bottom") +
+  theme_bw() +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+p1 + p2 + patchwork::plot_layout(widths = c(1,2))
+```
+
+- Most of the credible intervals are overlapping, and percentage of strikes are similar excepts for a few innings 
+
+### if_fielding_alignment
+
+```{r}
+train %>% 
+  group_by(if_fielding_alignment) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(if_fielding_alignment, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  labs(x = "% strike",
+       y = "In-field alignment") +
+  theme_bw()
+```
+### of_fielding_alignment
+
+```{r}
+train %>% 
+  mutate(of_fielding_alignment = fct_lump(of_fielding_alignment, prop = 0.01)) %>% 
+  group_by(of_fielding_alignment) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(of_fielding_alignment, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  labs(x = "% strike",
+       y = "Out-field alignment") +
+  theme_bw()
+```
+
+## Engineered categoricals
+
+### Bases
+
+```{r}
+train %>% 
+  mutate(across(on_3b:on_1b, function(col) if_else(col,"On","Off"))) %>% 
+  pivot_longer(cols = on_3b:on_1b) %>% 
+  group_by(name, value) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(value, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  labs(x = "% strike",
+       y = "On/off base") +
+  theme_bw() +
+  facet_grid(name ~ .)
+```
+
+
+#### Combining on-bases
+
+```{r}
+# This probably should have been done with a long case_when but I cbf
+train %>%
+  select(uid, on_1b, on_2b, on_3b, is_strike) %>% 
+  pivot_longer(cols = c(on_1b, on_2b, on_3b)) %>% 
+  mutate(base = str_extract(name, "\\d")) %>% 
+  filter(value) %>% 
+{bind_rows(., filter(
+  (train %>% transmute(uid, is_strike, name = "", value = TRUE, base = "0")),
+  !uid %in% unique(.$uid)))} %>% 
+  group_by(uid, is_strike) %>% 
+  summarise(bases = paste(base, collapse = ", "), .groups = "drop") %>%
+  group_by(bases) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(bases, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), linewidth = 0.3, width = 0.2) +
+  labs(title = "Batters on base when at bat",
+       x = "% strike",
+       y = "On/off base") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Count
+
+The count in baseball is the current number of balls and strikes on the batter.
+
+### Balls/strikes
+
+```{r}
+train %>% 
+  filter(balls < 4) %>% 
+  group_by(strikes, balls) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(factor(balls), pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  facet_grid(paste(strikes,"strike(s)") ~ .) +
+  theme_bw() +
+  labs(title = "Strike percentage for ball/strike status",
+       x = "% strikes", 
+       y = "balls") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+train %>% 
+  filter(balls < 4) %>% 
+  group_by(balls, strikes) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = balls, y = strikes, fill = pct_strike)) +
+  geom_tile() +
+  geom_text(aes(label = scales::percent(pct_strike, accuracy = 1.1)), col = "white")
+```
+
+- Less strikes are thrown when the ball count is lower, or when the strike count is higher
+
+
+### In zone
+
+```{r}
+# Horizontal strike-zone from mid-point of home plate
+horiz_sz = (17/2 + 2.9)/12
+
+train %>% 
+  # Find if pitch was in/out of strike zone
+  mutate(inZone = if_else(between(plate_x,-horiz_sz, horiz_sz) & between(plate_z,sz_bot, sz_top), "inZone","outZone")) %>% 
+  group_by(inZone) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(inZone, pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  theme_bw() +
+  labs(x = "% strikes", 
+       y = "In/Out strike zone") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+- Unsurprisingly the difference between the percentage of strikes in and out of the stike zone is large.
+
+### Outs when up
+
+```{r}
+train %>% 
+  group_by(outs_when_up) %>% 
+  summarise_strikes() %>% 
+  ggplot(aes(x = pct_strike, y = fct_reorder(factor(outs_when_up), pct_strike))) +
+  geom_point(aes(size = n)) +
+  geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
+  theme_bw() +
+  labs(x = "% strikes", 
+       y = "Number of outs") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Numeric variables
+
+```{r}
+mlb_skim %>% 
+  as_tibble() %>% 
+  filter(skim_type == "numeric") %>% 
+  select(-c(character.min:logical.count))
+```
+
+### ROC
+
+Use ROC to find out how predictive is each numeric predictor in isolation. Again, taken from DRob's [Sliced markdown](https://github.com/dgrtwo/data-screencasts/blob/c914b888df88198b67e2898216f8c6d40c072e2a/ml-practice/ep4.Rmd#L130) where he used it to find the numeric variables that were more predictive.
+
+```{r}
+train %>%
+  select(is_strike, release_pos_x, release_pos_y, release_pos_z, release_speed, 
+         release_spin_rate, plate_x, plate_z, spin_axis, pfx_x, pfx_z, sz_top, sz_bot) %>% 
+  pivot_longer(cols = -is_strike) %>% 
+  group_by(name) %>%
+  yardstick::roc_auc(truth = is_strike, value, event_level = "second") %>% 
+  arrange(desc(.estimate)) %>%
+  mutate(name = fct_reorder(name, .estimate)) %>%
+  ggplot(aes(.estimate, name)) +
+  geom_point() +
+  geom_vline(xintercept = .5) +
+  labs(x = "AUC",
+       y = "Variable",
+       title = "ROC AUC of numeric variables",
+       subtitle = ".5 is not predictive at all; <.5 means negatively associated with stikes, >.5 means positively associated")
+```
+
+- Pitch location at the plate (plate_x, plate_z) are the most predictive
+- Spin rate, release speed, and bottom strike zone are also predictive
+
+## Release
+
+```{r}
+p1 <- train %>% 
+  ggplot(aes(x = release_pos_x, y = release_pos_z, col = p_throws)) +
+  geom_density_2d() +
+  theme_bw() +
+  labs(x = "Release position x", 
+       y = "Release position y") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- train %>% 
+  mutate(release_pos_x = if_else(p_throws == "L", -release_pos_x, release_pos_x)) %>% 
+  ggplot(aes(x = release_pos_x, y = release_pos_z, col = p_throws)) +
+  geom_density_2d() +
+  theme_bw() +
+  labs(x = "Release position x", 
+       y = "Release position y") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p1 + p2 + 
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = "Pitcher relative position, right plot is adjusted for left/right pitcher",
+    subtitle = "The pitch x release is flipped if pitcher is left handed",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  )
+
+```
+
+- Not sure if this is a good idea, as it would removed t
+
+
+## Multi-variate
+
+### Strike zone
+
+Horizontal strike zone, around the mid-point of home plate = 17 inches/2 + 2.9 inches (diameter of baseball)
+
+```{r}
+left_sz = (17/2 + 2.9)/12
+
+train %>% 
+  ggplot(aes(x = plate_x, y = plate_z)) +
+  geom_bin_2d(binwidth = c(0.1,0.1)) +
+  geom_vline(xintercept = left_sz) +
+  geom_vline(xintercept = -left_sz) +
+  facet_wrap(~is_strike)
+```
+
+## Pitch location by pitch type
+
+```{r}
+train %>% 
+  left_join(pitch_type_lookup) %>% 
+  ggplot(aes(x = pfx_x, y = pfx_z)) +
+  geom_bin2d() +
+  facet_grid(p_throws~pitch_description)
+```
+
+## Numeric variable feature engineering
+
+```{r}
+train %>% 
+  mutate(plate_x = if_else(stand == "L", -plate_x, plate_x),
+         release_pos_x = if_else(p_throws == "L", -release_pos_x, release_pos_x),
+         inZone_low = plate_z - sz_bot,
+         inZone_high = plate_z - sz_top)
+```

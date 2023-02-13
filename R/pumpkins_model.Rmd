@@ -1,0 +1,49 @@
+---
+title: "Tidytuesday - Pumpkins"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(skimr)
+
+pumpkins_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-10-19/pumpkins.csv") %>% 
+  mutate(across(place,as.integer),
+         across(c(weight_lbs,ott,est_weight,pct_chart),as.double)) %>% 
+  separate(id,c("year","type"),sep = "-")
+
+```
+
+# Pumpkins dataset
+Julia Silge tutorial - https://juliasilge.com/blog/giant-pumpkins/
+## Table summary
+
+```{r}
+pumpkin_skim <- skim(pumpkins_raw)
+pumpkin_skim
+
+```
+
+
+
+```{r}
+pumpkins_raw %>% 
+  ggplot(aes(pct_chart,weight_lbs)) +
+  geom_point()
+
+pumpkins_raw %>% 
+  ggplot(aes(pct_chart)) +
+  geom_histogram(binwidth = 1)
+
+```
+
+```{r}
+pumpkins_raw %>%
+  group_by(year) %>% 
+  summarise(mean_wt = mean(weight_lbs,na.rm = T),
+            n = n(),
+            se = sd(weight_lbs,na.rm = T)) 
+  ggplot(aes(year,mean_wt)) +
+  geom_point(aes(size = n))
+```
+
