@@ -1,0 +1,188 @@
+---
+title: "Super Store Profits"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Super store EDA
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(here)
+
+train <- read_csv(here("data","sliced_s01e03","train.csv")) %>% 
+  mutate(across(c(postal_code),as.character),
+         across(c(quantity), as.factor),
+         log_sales = log(sales))
+```
+## Overview
+
+```{r}
+skimr::skim(train)
+
+```
+
+## Predictor variable
+
+Sales made for the order (USD). Sales appear to be log-normal, with no $0 sales.
+
+```{r}
+train %>% 
+  ggplot(aes(log(sales))) +
+  geom_histogram()
+```
+
+### Continuous variables
+
+#### discount
+
+```{r}
+train %>% 
+  ggplot(aes(x = discount, y = log_sales)) +
+  geom_point()
+```
+
+#### profit
+
+```{r}
+train %>% 
+  ggplot(aes(x = profit, y = log_sales)) +
+  geom_point()
+```
+
+
+### Discrete variables
+
+```{r}
+count_plot <- function(df, var){
+
+  df %>%
+    count({{var}}) %>%
+    mutate("{{var}}" := fct_reorder({{var}}, n)) %>% 
+  ggplot(aes(n, {{var}})) +
+  geom_col() +
+  labs(x = "Count")
+}
+
+sales_violin <- function(df, var){
+  df %>% 
+    mutate("{{var}}" := fct_reorder({{var}}, sales, median)) %>% 
+    ggplot(aes(x = log_sales, {{var}})) +
+    geom_violin(draw_quantiles = 0.5)
+
+  }
+
+```
+
+
+#### ship_mode
+
+```{r}
+train %>% 
+  count_plot(ship_mode)
+```
+
+```{r}
+train %>% 
+  sales_violin(ship_mode)
+```
+
+#### segment
+
+```{r}
+train %>% 
+  count_plot(segment)
+```
+
+```{r}
+train %>% 
+  sales_violin(segment)
+```
+
+#### city
+
+```{r}
+train %>% 
+  mutate(city = fct_lump_min(city, 40)) %>% 
+  count_plot(city)
+```
+
+```{r}
+train %>% 
+  mutate(state = fct_lump_min(state, 40)) %>% 
+  sales_violin(state)
+```
+
+#### state
+
+```{r}
+train %>% 
+  count_plot(state)
+```
+
+```{r}
+train %>% 
+  mutate(state = fct_lump_min(state, 40)) %>% 
+  sales_violin(state)
+```
+#### postal_code
+#### region
+
+```{r}
+train %>% 
+  count_plot(region)
+```
+
+```{r}
+train %>% 
+  mutate(state = fct_lump_min(region, 40)) %>% 
+  sales_violin(region)
+```
+
+#### category
+
+```{r}
+train %>% 
+  count_plot(category)
+```
+
+```{r}
+train %>% 
+  sales_violin(category)
+```
+
+#### sub_category
+
+```{r}
+train %>% 
+  count_plot(sub_category)
+```
+
+```{r}
+train %>% 
+  sales_violin(sub_category)
+```
+
+#### Quantity
+
+Quantity sold of the item
+ - Unit price can be calculated from this and sales
+
+```{r}
+train %>% 
+  count_plot(quantity)
+```
+
+```{r}
+train %>% 
+  mutate(item_price = (sales/as.numeric(quantity)) %>% round(digits = 2) %>% as.character()) %>% 
+  count(item_price, sort = T)
+  sales_violin(item_price)
+```
+
+
+
