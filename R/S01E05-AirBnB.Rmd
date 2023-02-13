@@ -171,6 +171,13 @@ train %>%
 ## Text analysis
 
 ```{r}
+
+slice_head_tail <- function(df,size){
+  df %>% 
+    ungroup() %>% 
+    dplyr::slice(1:size,(n()-size+1):n())
+}
+
 train %>% 
   mutate(name_no_stop = str_remove_all(name,"\\b(in|the|of|a)(?<=\\b)")) %>% 
   # filter(str_detect(name_no_stop,"in")) %>% 
@@ -181,9 +188,38 @@ train %>%
   summarise(mean_price = mean(price),
             n = n()) %>% 
   filter(n > 200) %>% 
-  arrange(-mean_price)
+  arrange(-mean_price) %>% 
+  slice_head_tail(size = 10) %>% 
+  ggplot(aes(mean_price,fct_reorder(text,mean_price),size = n)) +
+  geom_point()
+
 
 ```
+```{r}
+train %>% 
+  mutate(name_no_stop = str_remove_all(name,"\\b(in|the|of|a)(?<=\\b)")) %>% 
+  # filter(str_detect(name_no_stop,"in")) %>% 
+  # select(name,name_no_stop)
+  tidytext::unnest_tokens(text,name_no_stop,token = "words",drop = F) %>% 
+  filter(!text %in% stop_words$word,str_detect(text,"bed|br")) %>% 
+    head(10) %>% 
+  pull(name_no_stop) %>% 
+    regexplain::regexplain_gadget()
+
+#"bedroom(s)", bed room,"BD","br", "BR", studio, BDR, Rm, Home, Room, bdrm
+
+num_list <- c("one" = "1","two" = "2", "three" = "3", "four" = "4", "five" = "5", "six" = "6")
+
+train %>% 
+  mutate(name_no_stop = str_remove_all(name,"\\b(in|the|of|a)(?<=\\b)")) %>% 
+  # filter(str_detect(name_no_stop,"in")) %>% 
+  # select(name,name_no_stop)
+  tidytext::unnest_tokens(text,name_no_stop,token = "words",drop = F) %>% 
+  mutate(text = coalesce(num_list[text],text)) %>% 
+  group_by(id) %>% 
+  summarise(name = paste(text, collapse = " "))
+```
+
 
 # Modelling
 
