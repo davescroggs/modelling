@@ -137,7 +137,7 @@ p1 <- train %>%
   ggplot(aes(x = pct_strike, y = fct_reorder(inning_topbot, pct_strike))) +
   geom_point() +
   geom_errorbar(aes(xmin = low, xmax = high), width = 0.5)  +
-  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.111)) +
   labs(x = "% strike",
        y = "Innings top/bottom") +
   theme_bw()
@@ -149,7 +149,7 @@ p2 <- train %>%
   ggplot(aes(x = pct_strike, y = fct_reorder(inning_topbot, pct_strike))) +
   geom_point(aes(size = n)) +
   geom_errorbar(aes(xmin = low, xmax = high), width = 0.5) +
-  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.1)) +
+  scale_x_continuous(labels = ~scales::percent(.x, accuracy = 1.11)) +
   scale_size(breaks = seq(10000,20000,length.out = 5)) +
   facet_grid(inning~.) +
   labs(subtitle = "Sritke % of top and bottom of first 9 innings",
