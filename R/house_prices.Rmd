@@ -1,0 +1,218 @@
+---
+title: "Untitled"
+output: github_document
+---
+
+https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques/overview
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(xgboost)
+library(here)
+
+housing_data <- read_csv(here("data/house-prices/train.csv")) %>% 
+  mutate(SalePrice = log(SalePrice))
+
+housing_holdout <- read_csv(here("data/house-prices/test.csv"))
+
+housing_splits <- housing_data %>% initial_split()
+
+train <- housing_splits %>% training()
+
+```
+
+
+
+```{r}
+housing_skim <- skimr::skim(train)
+housing_skim
+```
+
+```{r}
+housing_skim %>% 
+  filter(skim_type == "numeric") %>% 
+  pull(skim_variable) %>% paste(collapse = " + ")
+  writeLines()
+```
+
+## Sale Price
+
+```{r}
+train %>% 
+  ggplot(aes(log(SalePrice))) +
+  geom_histogram()
+```
+### Summary function
+
+```{r}
+price_summary <- function(df, ...){
+  df %>% 
+    select(SalePrice, ...) %>% 
+    mutate(across(-SalePrice, ~fct_lump(.x, prop = 0.02))) %>% 
+  pivot_longer(cols = -SalePrice) %>%
+  group_by(name) %>%
+  mutate(SalePrice = log(SalePrice),
+         value = tidytext::reorder_within(value, SalePrice, name)) %>%
+  ggplot(aes(x = SalePrice, y = value)) +
+  geom_boxplot() +
+  tidytext::scale_y_reordered() +
+    facet_grid(name~., scales = "free_y")
+}
+```
+
+
+## MSZoning
+
+```{r}
+train %>% 
+  price_summary(MSZoning, Street, Alley, LotShape, LandContour, Utilities, LotConfig, LandSlope)
+```
+
+```{r}
+train %>% 
+  price_summary(Neighborhood, Condition1, Condition2, BldgType, HouseStyle, RoofStyle, RoofMatl, Exterior1st)
+```
+
+```{r}
+train %>% 
+  price_summary(Exterior2nd, MasVnrType, ExterQual, ExterCond, Foundation, BsmtQual, BsmtCond, BsmtExposure)
+```
+
+```{r}
+train %>% 
+  price_summary(BsmtFinType1, BsmtFinType2, Heating, HeatingQC, CentralAir, Electrical, KitchenQual, Functional)
+```
+
+```{r}
+train %>% 
+  price_summary(FireplaceQu, GarageType, GarageFinish, GarageQual, GarageCond, PavedDrive, PoolQC, Fence, MiscFeature, SaleType)
+```
+
+
+## Model
+
+```{r}
+train <- train %>% 
+  mutate(SalePrice = log(SalePrice))
+
+#p = 81
+
+house_cv <- train %>% 
+  vfold_cv(v = 5)
+
+ranger_recipe <- 
+  recipe(formula = SalePrice ~ MSZoning + Neighborhood + BsmtCond + BsmtExposure +
+           ExterQual + KitchenQual + GarageFinish + Id + MSSubClass +
+           LotFrontage + LotArea + OverallQual + OverallCond + YearBuilt +
+           YearRemodAdd + MasVnrArea + BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF +
+           TotalBsmtSF + `1stFlrSF` + `2ndFlrSF` + LowQualFinSF + GrLivArea + BsmtFullBath +
+           BsmtHalfBath + FullBath + HalfBath + BedroomAbvGr + KitchenAbvGr +
+           TotRmsAbvGrd + Fireplaces + GarageYrBlt + GarageCars + GarageArea +
+           WoodDeckSF + OpenPorchSF + EnclosedPorch + `3SsnPorch` +
+           ScreenPorch + PoolArea + MiscVal + MoSold + YrSold,
+         data = train) %>% 
+  update_role(Id, new_role = "id") %>% 
+  step_zv(all_predictors(), -SalePrice) %>% 
+  step_impute_mode(all_nominal_predictors()) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_other(all_nominal_predictors(), threshold = 0.02) %>% 
+  step_dummy(all_nominal_predictors())
+  
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+grid <- 
+  grid_latin_hypercube(mtry(c(5, 13)), min_n(), size = 30)
+
+set.seed(78719)
+ranger_tune <-
+  tune_grid(ranger_workflow, 
+            resamples = house_cv,
+            grid = grid,
+            metrics = metric_set(rmse),
+            control = control_grid(save_pred = T, verbose = T))
+
+autoplot(ranger_tune)
+
+```
+
+```{r}
+# last fit
+
+last_fit <- finalize_workflow(ranger_workflow, select_best(ranger_tune)) %>% 
+  last_fit(housing_splits)
+
+last_fit %>% collect_metrics()
+```
+
+### XGBoost
+
+```{r}
+xgboost_spec <-
+  boost_tree(
+    mtry = tune(),
+    trees = 600,
+    min_n = 20,
+    tree_depth = tune(),
+    learn_rate = 0.02,
+    loss_reduction = tune(),
+    #    sample_size = tune()
+  ) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(xgboost_spec) 
+
+xgb_grid <- 
+  grid_latin_hypercube(mtry(c(9,11)),
+                       tree_depth(c(3,7)),
+                       loss_reduction(),
+                       size = 30)
+
+
+xgboost_tune <-
+  tune_grid(xgboost_workflow, 
+            resamples = house_cv,
+            grid = xgb_grid,
+            metrics = metric_set(rmse),
+            control = control_grid(save_pred = T, verbose = T))
+
+autoplot(xgboost_tune)
+
+```
+
+```{r}
+# last fit
+
+last_fit <- finalize_workflow(xgboost_workflow, select_best(xgboost_tune)) %>% 
+  last_fit(housing_splits)
+
+last_fit %>% collect_metrics()
+```
+
+## Preduce submission
+
+```{r}
+final_model <- finalize_workflow(xgboost_workflow, select_best(xgboost_tune)) %>% 
+  fit(train)
+
+final_model %>% 
+  augment(housing_holdout) %>% 
+  transmute(Id, SalePrice = exp(.pred)) %>% 
+  write_csv(here("data/house-prices/xgb_submission.csv"))
+
+```
+
