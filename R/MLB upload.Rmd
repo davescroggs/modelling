@@ -1,5 +1,5 @@
 ---
-title: "MLB - Stacked"
+title: "Baseball pitches - Predicting strikes!"
 output: github_document
 ---
 
@@ -63,7 +63,7 @@ mlb_recipe_simple %>% prep %>% bake(new_data = train)
 doParallel::registerDoParallel(cores = 3)
 
 mset <- metric_set(mn_log_loss)
-control <- control_grid(verbose = TRUE, save_pred = TRUE)
+control_4stacks <- control_grid(verbose = TRUE, save_pred = TRUE, save_workflow = TRUE)
 
 mlb_cv_small <- train %>% 
   sample_n(20000) %>% 
@@ -105,7 +105,7 @@ grid_step2 <- crossing(trees = seq(600, 900, 100), mtry = c(7, 8, 12))
 xgboost_tune1 <-
   tune_grid(
     object = xgboost_spec1,
-    preprocessor = mlb_recipe_simple,
+    preprocessor = mlb_recipe,
     resamples = mlb_cv_small,
     grid = grid_step2,
     metrics = mset,
@@ -126,7 +126,7 @@ mlb_cv <- train %>%
 xgboost_resamples <-
   finalize_model(xgboost_spec1, tibble(mtry = 12, trees = 700)) %>% 
   fit_resamples(
-    preprocessor = mlb_recipe_simple,
+    preprocessor = mlb_recipe,
     resamples = mlb_cv,
     metrics = mset,
     control = control
@@ -266,7 +266,7 @@ xgboost_tune_major <-
     resamples = mlb_cv_small,
     grid = grid_step_major,
     metrics = mset,
-    control = control
+    control = control_4stacks
   )
 
 beepr::beep(8)
@@ -598,30 +598,3 @@ last_fit <- workflow(
 last_fit %>% 
   collect_metrics()
 ```
-
-## Stacks!
-
-https://johnbedwards.io/blog/stacks/
-
-```{r}
-library(stacks)
-
-
-
-xg_tune_best <- xgboost_tune_major %>%
-  filter_parameters(parameters = select_best(xgboost_tune_major))
-
-rf_tune_best <- rf_tune %>%
-  filter_parameters(parameters = select_best(rf_tune))
-
-xg_cb_combined <- stacks() %>%
-  add_candidates(xgboost_tune_major) %>%
-  #add_candidates(rf_tune)
-  blend_predictions()
-
-xg_cb_combined_fit <- xg_cb_combined %>%
-  fit_members()
-
-xg_cb_combined_fit
-```
-

@@ -1,0 +1,451 @@
+---
+title: "Spaceship - Titanic"
+output: github_document
+---
+
+## Setup
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(xgboost)
+library(ranger)
+library(here)
+library(stacks)
+
+spaceship_data <- read_csv(here("data/spaceship-titanic/train.csv")) %>% 
+  mutate(Transported = if_else(Transported, "Transported", "NotTransported") %>% factor)
+
+spaceship_holdout <- read_csv(here("data/spaceship-titanic/test.csv"))
+
+ss_split <-
+  spaceship_data %>%
+  initial_split(strata = Transported)
+
+test <- ss_split %>% 
+  testing()
+
+train <- ss_split %>% 
+  training()
+```
+
+
+## EDA
+
+```{r}
+# Setup summary function
+
+summarise_transport <- function(df){
+  df %>% 
+    summarise(nTransported = sum(Transported == "Transported"),
+              n = n(),
+              .groups = "drop") %>% 
+    arrange(desc(n)) %>% 
+    mutate(pctTransported = nTransported/n,
+           lower_bound = qbeta(0.025, nTransported + 0.5, n - nTransported + 0.5),
+           upper_bound = qbeta(0.975, nTransported + 0.5, n - nTransported + 0.5))
+}
+
+plot_pct <- function(df, col){
+  df %>% 
+  group_by({{col}}) %>% 
+  summarise_transport() %>% 
+  mutate("{{col}}" := fct_reorder({{col}}, pctTransported)) %>% 
+  ggplot(aes(x = pctTransported, y = {{col}}, size = n)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = lower_bound, xmax = upper_bound), linewidth = 0.2, width = 0.2)
+}
+
+
+```
+
+### SKIM!
+
+```{r}
+skimr::skim(train)
+```
+
+### Categorical
+
+PassengerId
+HomePlanet
+Cabin
+Destination
+Name
+
+#### Home Planet
+
+```{r}
+train %>% 
+  plot_pct(HomePlanet)
+```
+
+#### Cabin
+
+##### deck
+
+ - Include
+ - Lump deck T or low proportion
+
+```{r}
+train %>% 
+  extract(Cabin, c("deck","B","C"), regex = "(.*)/(.*)/(.*)") %>% 
+  plot_pct(deck)
+```
+
+##### num
+
+- Include
+- Pontentially lump
+
+```{r}
+train %>% 
+  #extract(Cabin, c("deck","num","C"), regex = "(.*)/(.*)/(.*)", convert = T) %>% 
+  mutate(num = factor(floor(num / 10))) %>% 
+  plot_pct(num)
+  summarise_transport() 
+  ggplot(aes(num, pctTransported)) + geom_violin(draw_quantiles = 0.5)
+  #group_by(num) %>% 
+  arrange(pctTransported) %>% 
+  dplyr::slice(1:20, (n()-20):n())
+```
+
+##### side
+
+- Include
+
+```{r}
+train %>% 
+  extract(Cabin, c("deck","num","side"), regex = "(.*)/(.*)/(.*)", convert = T) %>% 
+  plot_pct(C)
+```
+
+#### Destination
+
+- Include
+```{r}
+train %>% 
+  plot_pct(Destination)
+```
+
+##### Name
+
+```{r}
+train %>% 
+  select(Name)
+```
+
+## Logical
+
+### Cryosleep
+
+```{r}
+train %>% 
+  mutate(CryoSleep = if_else(CryoSleep, "Sleep", "NoSleep")) %>% 
+  plot_pct(CryoSleep)
+```
+
+### VIP
+
+```{r}
+train %>% 
+  mutate(VIP = if_else(VIP, "VIP", "NoVIP")) %>% 
+  plot_pct(VIP)
+```
+
+## Numeric
+
+```{r}
+train %>%
+  select(Transported, where(is.numeric)) %>% 
+  mutate(across(c(FoodCourt, RoomService, ShoppingMall, Spa, VRDeck), log1p)) %>% 
+  pivot_longer(cols = -Transported) %>% 
+  ggplot(aes(x = value)) +
+  geom_density() +
+  facet_wrap(~name, scales = "free")
+
+train %>% 
+  ggplot(aes(x = log1p(VRDeck))) +
+  geom_density()
+```
+
+
+### Predictive strength
+
+```{r}
+train %>%
+  select(Transported, where(is.numeric)) %>% 
+  transmute(num_floor = floor(num/10),num)
+  pivot_longer(cols = -Transported) %>% 
+  group_by(name) %>% 
+  yardstick::roc_auc(truth = Transported, value, event_level = "second") %>% 
+  arrange(desc(.estimate)) %>%
+  mutate(name = fct_reorder(name, .estimate)) %>%
+  ggplot(aes(.estimate, name)) +
+  geom_point() +
+  geom_vline(xintercept = .5) +
+  labs(x = "AUC",
+       y = "Variable",
+       title = "ROC AUC of numeric variables",
+       subtitle = ".5 is not predictive at all; <.5 means negatively associated with stikes, >.5 means positively associated")
+```
+
+## Model time!
+
+```{r}
+doParallel::registerDoParallel(cores = 3)
+set.seed(58370)
+# Model prep
+spaceship_data <- read_csv(here("data/spaceship-titanic/train.csv")) %>% 
+  mutate(Transported = if_else(Transported, "Transported", "NotTransported") %>% factor) %>% 
+  extract(Cabin, c("deck", "num","side"), regex = "(.*)/(.*)/(.*)", convert = T)
+
+spaceship_holdout <- read_csv(here("data/spaceship-titanic/test.csv")) %>% 
+  extract(Cabin, c("deck", "num","side"), regex = "(.*)/(.*)/(.*)", convert = T)
+
+ss_split <-
+  spaceship_data %>%
+  initial_split(strata = Transported)
+
+test <- ss_split %>% 
+  testing()
+
+train <- ss_split %>% 
+  training()
+
+titanic_resamples <- 
+  train %>% 
+  vfold_cv(v = 5, strata = Transported, repeats = 3)
+```
+
+### Recipe
+
+```{r}
+titanic_rec <- recipe(Transported ~ ., data = train) %>% 
+  step_rm(Name) %>% 
+  update_role(PassengerId, new_role = "id") %>% 
+  step_bin2factor(all_logical_predictors()) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_impute_mode(all_nominal_predictors()) %>% 
+  step_other(deck, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors())
+
+titanic_rec %>% prep %>% juice
+```
+
+### Model spec
+
+```{r}
+easy_control <- control_grid(verbose = TRUE, save_pred = TRUE)
+
+mset <- metric_set(accuracy, roc_auc)
+
+xgboost_spec <- 
+  boost_tree(
+    trees = tune(),
+    mtry = tune(),
+    min_n = tune(),
+    tree_depth = tune(),
+    learn_rate = 0.02,
+  ) %>%
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(titanic_rec) %>% 
+  add_model(xgboost_spec) 
+
+xgb_tune1 <-
+  crossing(
+    trees = seq(500, 800, 100),
+    mtry = c(3,5),
+    min_n = c(5, 10),
+    tree_depth = c(10, 15, 25)
+  )
+
+xgboost_tune <-
+  tune_grid(
+    xgboost_workflow,
+    resamples = titanic_resamples,
+    grid = xgb_tune1,
+    control = control_stack_grid(),
+    metrics = mset
+  )
+
+xgboost_tune %>% 
+  autoplot()
+
+xgboost_tune %>% collect_metrics() %>% arrange(-mean)
+```
+ - Best = 0.8098
+### Recipe trials
+
+```{r}
+titanic_rec_eng <- recipe(Transported ~ ., data = train) %>% 
+  step_rm(Name) %>% 
+  update_role(PassengerId, new_role = "id") %>% 
+  step_bin2factor(all_logical_predictors()) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_impute_mode(all_nominal_predictors()) %>% 
+  step_mutate(num = factor(floor(num / 10))) %>% 
+  step_other(deck, num, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors())
+
+xgboost_spec_eng <- 
+  boost_tree(
+    trees = tune(),
+    mtry = tune(),
+    min_n = tune(),
+    tree_depth = tune(),
+    learn_rate = 0.02,
+  ) %>%
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+xgboost_workflow_eng <- 
+  workflow() %>% 
+  add_recipe(titanic_rec) %>% 
+  add_model(xgboost_spec) 
+
+xgb_tune1_eng <-
+  crossing(
+    trees = seq(500, 800, 100),
+    mtry = c(5, 7, 9),
+    min_n = c(5, 10),
+    tree_depth = c(10, 15, 25)
+  )
+
+xgboost_tune_eng <-
+  tune_grid(
+    xgboost_workflow,
+    resamples = titanic_resamples,
+    grid = xgb_tune1,
+    control = control_stack_grid(),
+    metrics = mset
+  )
+
+autoplot(xgboost_tune_eng)
+
+```
+
+```{r}
+
+rec_trials <- 
+  list(simple = finalize_workflow(xgboost_workflow, select_best(xgboost_tune)),
+                                eng = finalize_workflow(xgboost_workflow_eng, select_best(xgboost_tune_eng))) 
+
+res <-  workflowsets::as_workflow_set(!!!rec_trials) %>% 
+  workflow_map("fit_resamples", 
+               resamples = titanic_resamples,
+               control = control_stack_grid(),
+               metrics = mset)
+
+res %>% collect_metrics()
+```
+
+
+## Last fit
+
+```{r}
+xgb_last_fit <- 
+  finalize_workflow(xgboost_workflow_eng, select_best(xgboost_tune_eng)) %>%
+  last_fit(ss_split)
+
+xgb_last_fit %>% collect_metrics()
+```
+
+## Create submission
+
+```{r}
+final_model <- 
+  finalize_workflow(xgboost_workflow_eng, select_best(xgboost_tune_eng)) %>% 
+  fit(train)
+
+final_model %>%   
+augment(spaceship_holdout) %>%  
+    transmute(PassengerId, Transported = if_else(.pred_class == "Transported", "True", "False")) %>% 
+    write_csv("data/spaceship-titanic/engineered_submission.csv")
+```
+
+```{r}
+importances <- xgboost::xgb.importance(model = final_model$fit$fit$fit)
+
+importances %>%
+  mutate(Feature = fct_reorder(Feature, Gain)) %>%
+  ggplot(aes(Gain, Feature)) +
+  geom_point()
+```
+
+## Logistic regression
+
+```{r}
+glmnet_recipe <- 
+  titanic_rec <- recipe(Transported ~ ., data = train) %>% 
+  step_rm(Name) %>% 
+  update_role(PassengerId, new_role = "id") %>% 
+  step_bin2factor(all_logical_predictors()) %>% 
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_impute_mode(all_nominal_predictors()) %>% 
+  step_other(deck, threshold = 0.01) %>% 
+  step_log(FoodCourt, RoomService, ShoppingMall, Spa, VRDeck, offset = 1) %>% 
+  step_dummy(all_nominal_predictors())
+
+glmnet_recipe %>% prep %>% juice
+
+glmnet_spec <- 
+  logistic_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet") 
+
+glmnet_workflow <- 
+  workflow() %>% 
+  add_recipe(glmnet_recipe) %>% 
+  add_model(glmnet_spec) 
+
+glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
+    0.2, 0.4, 0.6, 0.8, 1)) 
+
+glmnet_tune <- 
+  tune_grid(glmnet_workflow, resamples = titanic_resamples, grid = glmnet_grid, metrics = mset, control = control_stack_grid()) 
+```
+
+
+
+
+```{r}
+glmnet_tune %>% collect_metrics()
+glmnet_tune %>% autoplot()
+glmnet_tune %>% select_best()
+```
+
+## Stacks
+
+```{r}
+model_stack <- stacks() %>% 
+  add_candidates(glmnet_tune) %>% 
+  add_candidates(xgboost_tune)
+
+model_stack_fit <- model_stack %>% 
+  blend_predictions(
+    penalty = 10^(-9:-1), # tune over these penalty values
+    mixture = 0, # do a ridge regression instead of a LASSO regression
+    times = 50 # bootstrap 50 samples from the train set
+  ) %>% 
+  fit_members()
+
+spaceship_holdout %>% 
+  transmute(PassengerId, 
+            Transported = predict(model_stack_fit, spaceship_holdout)$.pred_class,
+            Transported = if_else(Transported == "Transported", "True", "False")) %>% 
+write_csv(here("data/spaceship-titanic/stacked_submission.csv"))
+```
+
+```{r}
+xgb_last_fit <- 
+  finalize_workflow(xgboost_workflow_eng, select_best(xgboost_tune_eng)) %>%
+  last_fit(ss_split)
+```
+
