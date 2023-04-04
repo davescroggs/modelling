@@ -1,0 +1,119 @@
+---
+title: "Expected Homers!"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+https://www.kaggle.com/competitions/nwds-xhr/data
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(scales)
+
+homers_data <- read_csv("data/nwds-xhr/train.csv")
+
+homers_split <- initial_split(homers_data)
+
+test <- testing(homers_split)
+train <- training(homers_split)
+```
+
+## Skim
+
+Take a quick look at the training data and identify things like columns with missing data and the proportion
+
+Column type frequency:           
+  character                7     
+  logical                  3     
+  numeric                  24
+
+```{r}
+(homers_skim <- skim(train))
+```
+
+
+## EDA
+
+### Categorical features
+
+- home_team
+- pitch_type
+- stand
+- p_throws
+- inning_topbot
+- if_fielding_alignment
+- of_fielding_alignment
+
+
+First create a summary function to provide summary statistics for home runs by group.
+```{r}
+
+homers_summarise <- function(df){
+  df %>% 
+    summarise(n_homer = sum(is_hr == 1),
+              n = n(),
+              .groups = "drop") %>% 
+    arrange(desc(n)) %>% 
+    mutate(pct_hr = n_homer/n,
+           low = qbeta(.025, n_homer + 0.5, n - n_homer + 0.5),
+           high = qbeta(.975, n_homer + 0.5, n - n_homer + 0.5))
+}
+
+homer_plot <- function(df, col) {
+  df %>% 
+    group_by({{col}}) %>% 
+    homers_summarise() %>% 
+    mutate("{{col}}" := fct_reorder({{col}}, pct_hr)) %>% 
+    ggplot(aes(x = pct_hr, y = {{col}})) +
+    geom_point(aes(size = n)) +
+    geom_errorbar(aes(xmin = low, xmax = high), width = 0.6, linewidth = 0.3) +
+    labs(x = "% home runs") +
+    scale_x_continuous(labels = percent)
+}
+
+```
+
+#### Home team
+
+```{r}
+train %>% 
+  homer_plot(home_team)
+```
+
+
+### pitch_type
+
+```{r}
+train %>% 
+  homer_plot(pitch_type)
+```
+
+### stand
+
+```{r}
+train %>% 
+  homer_plot(stand)
+```
+
+### p_throws
+
+```{r}
+train %>% 
+  homer_plot(p_throws)
+```
+### inning_topbot
+
+```{r}
+train %>% 
+  homer_plot(inning_topbot)
+```
+
+### if_fielding_alignment
+
+
+### of_fielding_alignment
