@@ -15,6 +15,9 @@ library(tidymodels)
 library(skimr)
 library(scales)
 
+# Kaggle API download
+# kaggle competitions download -c nwds-xhr
+
 homers_data <- read_csv("data/nwds-xhr/train.csv")
 
 homers_split <- initial_split(homers_data)
