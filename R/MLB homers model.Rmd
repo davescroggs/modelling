@@ -1,0 +1,223 @@
+---
+title: "MLB Homers prediction"
+author: 'Dave Scroggs'
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    number_sections: true
+    toc: true
+---
+
+Predicting home runs in the MLB for [Nick Wan's XHR](https://www.kaggle.com/competitions/nwds-xhr/data) competition using tidymodels.
+
+```{r warning=FALSE, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(scales)
+library(here)
+
+theme_set(theme_bw() +
+            theme(plot.title = element_text(hjust = 0.5),
+                  plot.subtitle = element_text(hjust = 0.5)))
+set.seed(2023)
+```
+
+## Set up test/train objects
+
+Set up the initial data files
+- Holdout data: Used to create the final submission
+- Split object: Split the data into test/train set
+- Test: Used as a validation set
+
+```{r include=FALSE}
+# Kaggle API download
+# kaggle competitions download -c nwds-xhr
+
+homers_holdout <- read_csv(here("data/nwds-xhr/test.csv"))
+
+homers_data <- read_csv(here("data/nwds-xhr/train.csv")) %>% 
+  mutate(is_hr = if_else(is_hr == 1, "homer", "no_homer") %>% factor)
+
+homers_split <- initial_split(homers_data)
+
+test <- testing(homers_split)
+train <- training(homers_split)
+
+```
+
+### Pre-preocessing recipe
+
+Create a pre-processing recipe based on the most predictive features from the EDA. Apply any transformations identified in the EDA.
+
+```{r}
+xgboost_recipe <- 
+  recipe(formula = is_hr ~ 
+           # Identifier variable
+           uid + 
+           # Categorical features
+           home_team + pitch_type + if_fielding_alignment +
+           # Numeric features
+           hc_x + hc_y + strikes + sz_top + sz_bot + balls + pfx_z +
+           plate_x + plate_z + launch_speed + launch_angle + at_bat_number + inning,
+         data = train) %>% 
+  update_role(uid, new_role = "id") %>% 
+  step_novel(pitch_type, if_fielding_alignment) %>% 
+  step_other(pitch_type, if_fielding_alignment, threshold = 0.01) %>% 
+  step_unknown(pitch_type, if_fielding_alignment) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) 
+
+# Test recipe process works without error
+# xgboost_recipe %>% prep %>% juice
+```
+
+## XGBoost model fit
+
+Since there are several numeric features that predictive I'll start with an XGBoost model. A nice way to produce the boilerplate code for several common models is the functions from the usemodels package. The initial code for most of the model components below can be produced with the command below. I inserted my recipe after the fact and also removed some of the tuning of certain hyper parameters.
+
+`usemodels::use_xgboost(is_hr ~ ., data = train)`
+
+
+### Hyperparameter tuning
+
+The following code was used to search for good hyper parameters for this model workflow (preprocessor + model spec). I have included each of the hyper parameter steps I went through at the end of this script. I fit the hyper parameters on a sample of 30000 pitches, using 5 fold cross validation. After each tuning step I adjusted the hyper parameters to improve the fit. The set of parameters below are the final model candidate parameters to trial.
+
+```{r}
+# resamples
+small_cv <- train %>% 
+  sample_n(30000) %>% 
+  rsample::vfold_cv(v = 5)
+
+# fit metric
+mset <- metric_set(mn_log_loss)
+
+# model specification
+xgboost_spec <- 
+  boost_tree(
+    trees = 800,
+    min_n = 8,
+    mtry = tune(),
+    tree_depth = 10,
+    learn_rate = 0.02,
+    loss_reduction = 0.35) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost")
+
+# create a workflow
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+# xgboost_grid_initial <- grid_latin_hypercube(mtry(c(13,18)),
+#                                              loss_reduction(c(-7,0), trans = log10_trans()),
+#                                              size = 15)
+
+# final grid object
+xgboost_grid_initial <- tibble(mtry = 13:18)
+
+# set up parallel processing
+# comment out for kaggle
+#doParallel::registerDoParallel(cores = 4)
+
+# TUNE!!!
+xgboost_tune <-
+  tune_grid(
+    xgboost_workflow,
+    resamples = small_cv,
+    grid = xgboost_grid_initial,
+    metrics = mset,
+    control = control_grid(verbose = T, save_pred = T)
+  )
+
+# inspect results
+xgboost_tune %>% autoplot()
+
+xgboost_tune %>% select_best()
+```
+
+## Check against holdout
+
+Test the best model parameters against a set of data that the model hasn't seen as a sanity check against over fitting.
+
+```{r}
+last_fit <- workflow(preprocessor = xgboost_recipe,
+         spec = boost_tree(
+           trees = 800,
+           min_n = 8,
+           mtry = 14,
+           tree_depth = 10,
+           learn_rate = 0.02,
+           loss_reduction = 0.35) %>% 
+           set_mode("classification") %>% 
+           set_engine("xgboost")) %>% 
+  last_fit(homers_split, metrics = mset)
+
+last_fit %>% collect_metrics()
+
+```
+
+### Create submission
+
+Fit a final model on the whole training data set and create a submission from the original test data.
+```{r}
+
+final_model <- workflow(preprocessor = xgboost_recipe,
+         spec = boost_tree(
+           trees = 800,
+           min_n = 8,
+           mtry = 14,
+           tree_depth = 10,
+           learn_rate = 0.02,
+           loss_reduction = 0.35) %>% 
+           set_mode("classification") %>% 
+           set_engine("xgboost")) %>% 
+  fit(train)
+
+final_model %>% 
+  augment(homers_holdout) %>% 
+  transmute(uid, is_hr = .pred_homer) %>% 
+  write_csv(here("data/nwds-xhr/first_submission.csv"))
+
+
+```
+
+### Upload submission via API
+
+This is my first time using the kaggle API and I liked it! Uploaded the submission straight to kaggle and check the leaderboard [big brain dot gif].
+
+```{r}
+system('kaggle competitions submit -c nwds-xhr -f ../data/nwds-xhr/first_submission.csv -m "First submission via API"')
+
+system("kaggle competitions  leaderboard nwds-xhr --show")
+```
+
+### Appendix: Tuning steps
+
+The steps below are the tuning grids I used in order of first trial to last. The grid_latin_hypercube function spaces the tuning parameter ["points farther away from one another and allows a better exploration of the hyperparameter space"](https://www.tmwr.org/grid-search.html).
+
+```{r}
+# xgboost_grid_initial <- grid_latin_hypercube(trees(c(300, 800)),
+#                                              min_n(c(5, 40)),
+#                                              mtry(c(6, 9)),
+#                                              tree_depth(3, 10),
+#                                              size = 30)
+# 
+# xgboost_grid_initial <- grid_latin_hypercube(trees(c(650, 900)),
+#                                              mtry(c(8, 11)),
+#                                              tree_depth(c(7, 11)),
+#                                              size = 30)
+# 
+# xgboost_grid_initial <- grid_latin_hypercube(trees(c(650, 900)),
+#                                              mtry(c(10, 12)),
+#                                              loss_reduction(),
+#                                              size = 30)
+# 
+# xgboost_grid_initial <- grid_latin_hypercube(mtry(c(12, 15)),
+#                                              loss_reduction(-7, 0, trans = log10_trans()),
+#                                              size = 15)
+# 
+# xgboost_grid_initial <- tibble(mtry = 13:18)
+
+```

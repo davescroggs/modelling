@@ -14,16 +14,23 @@ library(tidyverse)
 library(tidymodels)
 library(skimr)
 library(scales)
+library(here)
 
+set.seed(2023)
 # Kaggle API download
 # kaggle competitions download -c nwds-xhr
 
-homers_data <- read_csv("data/nwds-xhr/train.csv")
+homers_data <- read_csv(here("data/nwds-xhr/train.csv")) %>% 
+  mutate(is_hr = if_else(is_hr == 1, "homer", "no_homer") %>% factor)
 
 homers_split <- initial_split(homers_data)
 
 test <- testing(homers_split)
 train <- training(homers_split)
+
+theme_set(theme_bw() +
+            theme(plot.title = element_text(hjust = 0.5),
+                  plot.subtitle = element_text(hjust = 0.5)))
 ```
 
 ## Skim
@@ -58,7 +65,7 @@ First create a summary function to provide summary statistics for home runs by g
 
 homers_summarise <- function(df){
   df %>% 
-    summarise(n_homer = sum(is_hr == 1),
+    summarise(n_homer = sum(is_hr == "homer"),
               n = n(),
               .groups = "drop") %>% 
     arrange(desc(n)) %>% 
@@ -93,6 +100,7 @@ train %>%
 
 ```{r}
 train %>% 
+  mutate(pitch_type = fct_lump_prop(pitch_type, 0.01)) %>% 
   homer_plot(pitch_type)
 ```
 
@@ -118,5 +126,45 @@ train %>%
 
 ### if_fielding_alignment
 
+```{r}
+train %>% 
+  homer_plot(if_fielding_alignment)
+```
+
 
 ### of_fielding_alignment
+
+```{r}
+train %>% 
+  homer_plot(of_fielding_alignment)
+```
+
+
+### innings
+
+```{r}
+train %>% 
+  filter(inning < 10) %>% 
+  mutate(inning = if_else(inning_topbot == "Top", inning + 0.5, inning) %>% factor) %>% 
+  homer_plot(inning)
+```
+
+### Numeric features
+
+```{r}
+train %>% 
+select(sz_top, sz_bot, release_pos_x, release_pos_y, release_pos_z, inning, outs_when_up, balls, strikes, pitch_number, at_bat_number, release_speed, spin_axis, release_spin_rate, pfx_x, pfx_z, plate_x, plate_z, hc_x, hc_y, launch_speed, launch_angle, is_hr) %>% 
+  pivot_longer(cols = -is_hr) %>% 
+  group_by(name) %>%
+  yardstick::roc_auc(truth = is_hr, value, event_level = "second") %>% 
+  arrange(desc(.estimate)) %>%
+  mutate(name = fct_reorder(name, .estimate)) %>%
+  ggplot(aes(.estimate, name)) +
+  geom_point() +
+  geom_vline(xintercept = .5) +
+  labs(x = "AUC",
+       y = "Variable",
+       title = "ROC AUC of numeric variables",
+       subtitle = ".5 is not predictive at all; <.5 means negatively associated with stikes, >.5 means positively associated")
+```
+
